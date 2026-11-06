@@ -1,0 +1,384 @@
+import os
+import random
+import string
+from PySide6.QtCore import Qt, QSize
+from PySide6.QtGui import QIcon, QFont, QPixmap, QPainter, QColor
+from PySide6.QtWidgets import (
+    QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QLabel,
+    QLineEdit, QPushButton, QFrame, QSystemTrayIcon, QMenu, QApplication
+)
+
+from config import load_config, save_config, generate_random_code
+from ui.keybind_widget import MinecraftKeybindButton
+from ui.connector_window import ConnectorWindow
+from core.network import ConnecteeClient, ConnectorClient
+from core.capturer import ScreenCapturer
+from core.input_simulator import InputSimulator
+from core.hotkey_listener import HotkeyManager
+
+def create_tray_icon_pixmap() -> QPixmap:
+    pixmap = QPixmap(32, 32)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setBrush(QColor("#3b82f6")) # Blue circle
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.drawEllipse(2, 2, 28, 28)
+    painter.setBrush(QColor("#ffffff"))
+    painter.drawEllipse(11, 11, 10, 10)
+    painter.end()
+    return pixmap
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.config = load_config()
+        self.setWindowTitle("Hotspot")
+        self.setFixedSize(760, 480)
+
+        # Ensure code exists
+        if not self.config.get("saved_code"):
+            self.config["saved_code"] = generate_random_code()
+            save_config(self.config)
+
+        # Core subsystems
+        self.input_simulator = InputSimulator()
+        self.capturer: ScreenCapturer = None
+        self.connector_window: ConnectorWindow = None
+        self.connector_client: ConnectorClient = None
+
+        # Build UI
+        self._setup_style()
+        self._build_ui()
+        self._setup_system_tray()
+
+        # Connectee Client & Screen Capturer
+        self.connectee_client = ConnecteeClient(
+            server_url=self.config["server_url"],
+            code=self.config["saved_code"],
+            nickname=self.config.get("nickname", "Host"),
+            input_simulator=self.input_simulator
+        )
+
+        # Hotkeys
+        self.hotkey_manager = HotkeyManager(
+            on_freeze_toggle=self._on_hotkey_freeze,
+            on_kick_and_reset=self._on_hotkey_kick
+        )
+        self.hotkey_manager.update_freeze_hotkey(self.config.get("keybind_freeze"))
+        self.hotkey_manager.update_kick_hotkey(self.config.get("keybind_kick"))
+
+        # Bind Connectee Network Signals
+        self.connectee_client.signals.registered.connect(self._on_host_registered)
+        self.connectee_client.signals.connector_joined.connect(self._on_connector_joined)
+        self.connectee_client.signals.code_reset.connect(self._on_host_code_reset)
+
+        # Start Connectee
+        self.connectee_client.start()
+        # Capturer thread pushes frames into connectee's queue
+        self.capturer = ScreenCapturer(
+            frame_queue=self.connectee_client.frame_queue,
+            loop=self.connectee_client.loop,
+            target_fps=30
+        )
+        self.capturer.start()
+
+    def _setup_style(self):
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #09090b;
+            }
+            QWidget {
+                color: #f4f4f5;
+                font-family: 'Segoe UI', system-ui, sans-serif;
+            }
+            QLabel {
+                font-size: 13px;
+            }
+            QLineEdit {
+                background-color: #18181b;
+                border: 1px solid #27272a;
+                border-radius: 6px;
+                padding: 8px 12px;
+                color: #fafafa;
+                font-size: 14px;
+            }
+            QLineEdit:focus {
+                border-color: #3b82f6;
+            }
+            QPushButton.primary-btn {
+                background-color: #2563eb;
+                color: white;
+                font-weight: 600;
+                border: none;
+                border-radius: 6px;
+                padding: 10px 16px;
+                font-size: 14px;
+            }
+            QPushButton.primary-btn:hover {
+                background-color: #1d4ed8;
+            }
+            QPushButton.secondary-btn {
+                background-color: #27272a;
+                color: #e4e4e7;
+                border: 1px solid #3f3f46;
+                border-radius: 6px;
+                padding: 6px 12px;
+                font-size: 12px;
+            }
+            QPushButton.secondary-btn:hover {
+                background-color: #3f3f46;
+            }
+        """)
+
+    def _build_ui(self):
+        central_widget = QWidget(self)
+        self.setCentralWidget(central_widget)
+        main_layout = QHBoxLayout(central_widget)
+        main_layout.setContentsMargins(24, 24, 24, 24)
+        main_layout.setSpacing(20)
+
+        # ================= LEFT HALF: CONNECTOR =================
+        left_box = QWidget()
+        left_layout = QVBoxLayout(left_box)
+        left_layout.setContentsMargins(16, 16, 16, 16)
+        left_layout.setSpacing(14)
+
+        conn_title = QLabel("Connect to Friend")
+        conn_title.setStyleSheet("font-size: 18px; font-weight: 700; color: #60a5fa;")
+        left_layout.addWidget(conn_title)
+
+        conn_desc = QLabel("Enter your friend's 4-letter code to view and interact with their screen.")
+        conn_desc.setWordWrap(True)
+        conn_desc.setStyleSheet("color: #a1a1aa; font-size: 12px; line-height: 1.4;")
+        left_layout.addWidget(conn_desc)
+
+        left_layout.addSpacing(10)
+
+        code_lbl = QLabel("ROOM CODE")
+        code_lbl.setStyleSheet("font-weight: 600; font-size: 11px; color: #71717a; letter-spacing: 1px;")
+        left_layout.addWidget(code_lbl)
+
+        self.input_code = QLineEdit()
+        self.input_code.setPlaceholderText("e.g. ABCD")
+        self.input_code.setMaxLength(4)
+        self.input_code.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.input_code.setStyleSheet("font-size: 24px; font-weight: bold; letter-spacing: 6px;")
+        self.input_code.textChanged.connect(lambda t: self.input_code.setText(t.upper()))
+        left_layout.addWidget(self.input_code)
+
+        self.btn_connect = QPushButton("Connect")
+        self.btn_connect.setProperty("class", "primary-btn")
+        self.btn_connect.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_connect.clicked.connect(self._on_connect_clicked)
+        left_layout.addWidget(self.btn_connect)
+
+        self.lbl_connector_status = QLabel("")
+        self.lbl_connector_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_connector_status.setStyleSheet("color: #f87171; font-size: 12px;")
+        left_layout.addWidget(self.lbl_connector_status)
+
+        left_layout.addStretch()
+        main_layout.addWidget(left_box)
+
+        # Vertical Divider
+        divider = QFrame()
+        divider.setFrameShape(QFrame.Shape.VLine)
+        divider.setFrameShadow(QFrame.Shadow.Sunken)
+        divider.setStyleSheet("color: #27272a;")
+        main_layout.addWidget(divider)
+
+        # ================= RIGHT HALF: CONNECTEE =================
+        right_box = QWidget()
+        right_layout = QVBoxLayout(right_box)
+        right_layout.setContentsMargins(16, 16, 16, 16)
+        right_layout.setSpacing(12)
+
+        host_title = QLabel("Your Device (Connectee)")
+        host_title.setStyleSheet("font-size: 18px; font-weight: 700; color: #34d399;")
+        right_layout.addWidget(host_title)
+
+        # Nickname field
+        nick_layout = QHBoxLayout()
+        nick_lbl = QLabel("Nickname:")
+        nick_lbl.setStyleSheet("color: #a1a1aa; font-weight: 500;")
+        self.nick_input = QLineEdit(self.config.get("nickname", "Host"))
+        self.nick_input.setPlaceholderText("Your Nickname")
+        self.nick_input.textChanged.connect(self._on_nickname_changed)
+        nick_layout.addWidget(nick_lbl)
+        nick_layout.addWidget(self.nick_input)
+        right_layout.addLayout(nick_layout)
+
+        right_layout.addSpacing(6)
+
+        # 4-Letter Code Box
+        your_code_lbl = QLabel("YOUR SHARE CODE")
+        your_code_lbl.setStyleSheet("font-weight: 600; font-size: 11px; color: #71717a; letter-spacing: 1px;")
+        right_layout.addWidget(your_code_lbl)
+
+        code_box = QHBoxLayout()
+        self.lbl_my_code = QLabel(self.config.get("saved_code", "----"))
+        self.lbl_my_code.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_my_code.setStyleSheet("""
+            background-color: #18181b;
+            border: 1px dashed #3f3f46;
+            border-radius: 8px;
+            padding: 8px 16px;
+            font-size: 26px;
+            font-weight: 800;
+            letter-spacing: 8px;
+            color: #38bdf8;
+        """)
+        code_box.addWidget(self.lbl_my_code)
+
+        btn_reset_code = QPushButton("Reset Code")
+        btn_reset_code.setProperty("class", "secondary-btn")
+        btn_reset_code.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_reset_code.clicked.connect(self._on_reset_code_clicked)
+        code_box.addWidget(btn_reset_code)
+        right_layout.addLayout(code_box)
+
+        right_layout.addSpacing(10)
+
+        # Keybind Controls (Minecraft-style buttons)
+        keybinds_header = QLabel("EMERGENCY KEYBINDS")
+        keybinds_header.setStyleSheet("font-weight: 600; font-size: 11px; color: #71717a; letter-spacing: 1px;")
+        right_layout.addWidget(keybinds_header)
+
+        # Keybind 1: Freeze
+        kb1_layout = QHBoxLayout()
+        kb1_lbl = QLabel("Toggle Freeze Input:")
+        kb1_lbl.setStyleSheet("color: #e4e4e7; font-size: 12px;")
+        self.btn_kb_freeze = MinecraftKeybindButton(self.config.get("keybind_freeze", "None"))
+        self.btn_kb_freeze.keybind_changed.connect(self._on_freeze_key_changed)
+        kb1_layout.addWidget(kb1_lbl)
+        kb1_layout.addWidget(self.btn_kb_freeze)
+        right_layout.addLayout(kb1_layout)
+
+        # Keybind 2: Kick & Reset
+        kb2_layout = QHBoxLayout()
+        kb2_lbl = QLabel("Kick All & Reset Code:")
+        kb2_lbl.setStyleSheet("color: #e4e4e7; font-size: 12px;")
+        self.btn_kb_kick = MinecraftKeybindButton(self.config.get("keybind_kick", "None"))
+        self.btn_kb_kick.keybind_changed.connect(self._on_kick_key_changed)
+        kb2_layout.addWidget(kb2_lbl)
+        kb2_layout.addWidget(self.btn_kb_kick)
+        right_layout.addLayout(kb2_layout)
+
+        right_layout.addStretch()
+        main_layout.addWidget(right_box)
+
+    def _setup_system_tray(self):
+        self.tray_icon = QSystemTrayIcon(self)
+        self.tray_icon.setIcon(QIcon(create_tray_icon_pixmap()))
+        self.tray_icon.setToolTip("Hotspot Remote Control")
+
+        tray_menu = QMenu()
+        open_action = tray_menu.addAction("Open Hotspot")
+        open_action.triggered.connect(self.show_and_activate)
+
+        reset_action = tray_menu.addAction("Reset Code & Kick")
+        reset_action.triggered.connect(self._on_reset_code_clicked)
+
+        tray_menu.addSeparator()
+        exit_action = tray_menu.addAction("Exit App")
+        exit_action.triggered.connect(self._full_exit)
+
+        self.tray_icon.setContextMenu(tray_menu)
+        # Single-click on tray icon restores window
+        self.tray_icon.activated.connect(self._on_tray_activated)
+        self.tray_icon.show()
+
+    def _on_tray_activated(self, reason):
+        if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
+            self.show_and_activate()
+
+    def show_and_activate(self):
+        self.showNormal()
+        self.activateWindow()
+
+    def _on_connect_clicked(self):
+        code = self.input_code.text().strip().upper()
+        if len(code) != 4:
+            self.lbl_connector_status.setText("Please enter a valid 4-letter code.")
+            return
+
+        self.lbl_connector_status.setText("Connecting...")
+        self.connector_client = ConnectorClient(
+            server_url=self.config["server_url"],
+            code=code
+        )
+        self.connector_client.signals.joined.connect(self._on_connector_joined_success)
+        self.connector_client.signals.join_error.connect(self._on_connector_join_error)
+        self.connector_client.start()
+
+    def _on_connector_joined_success(self, code: str, nickname: str, is_blocked: bool):
+        self.lbl_connector_status.setText("")
+        # Open fullscreen connector window
+        self.connector_window = ConnectorWindow(
+            connector_client=self.connector_client,
+            nickname=nickname,
+            is_blocked=is_blocked
+        )
+        self.connector_window.show()
+
+    def _on_connector_join_error(self, err_msg: str):
+        self.lbl_connector_status.setText(err_msg)
+
+    def _on_host_registered(self, code: str, nickname: str):
+        self.lbl_my_code.setText(code)
+        self.config["saved_code"] = code
+        save_config(self.config)
+
+    def _on_connector_joined(self, count: int):
+        # Auto-hide Connectee UI completely to tray when a friend connects
+        self.hide()
+
+    def _on_host_code_reset(self, new_code: str):
+        self.lbl_my_code.setText(new_code)
+        self.config["saved_code"] = new_code
+        save_config(self.config)
+
+    def _on_reset_code_clicked(self):
+        self.connectee_client.kick_and_reset()
+
+    def _on_nickname_changed(self, text: str):
+        nick = text.strip() or "Host"
+        self.config["nickname"] = nick
+        save_config(self.config)
+        self.connectee_client.update_nickname(nick)
+
+    def _on_freeze_key_changed(self, key: str):
+        self.config["keybind_freeze"] = key if key != "None" else None
+        save_config(self.config)
+        self.hotkey_manager.update_freeze_hotkey(self.config["keybind_freeze"])
+
+    def _on_kick_key_changed(self, key: str):
+        self.config["keybind_kick"] = key if key != "None" else None
+        save_config(self.config)
+        self.hotkey_manager.update_kick_hotkey(self.config["keybind_kick"])
+
+    def _on_hotkey_freeze(self):
+        self.connectee_client.toggle_freeze()
+
+    def _on_hotkey_kick(self):
+        self.connectee_client.kick_and_reset()
+
+    def closeEvent(self, event):
+        # Stealth close: Minimize to system tray only, do not quit
+        event.ignore()
+        self.hide()
+
+    def _full_exit(self):
+        # Stop background services
+        if self.capturer:
+            self.capturer.stop()
+        if self.connectee_client:
+            self.connectee_client.stop()
+        if self.connector_client:
+            self.connector_client.disconnect()
+        if self.hotkey_manager:
+            self.hotkey_manager.stop_all()
+        if self.tray_icon:
+            self.tray_icon.hide()
+        QApplication.quit()
