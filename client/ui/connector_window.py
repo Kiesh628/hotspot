@@ -559,8 +559,8 @@ class ConnectorWindow(QWidget):
             self.prompt_input.clear()
             self.chat_history.append(f"<b style='color:#60a5fa;'>You (Boxed Region):</b> {prompt}")
         else:
-            prompt = "Analyze and explain what is in this selected area of the screen, point out any errors or important elements, and suggest what to do next."
-            self.chat_history.append(f"<b style='color:#60a5fa;'>You:</b> <i>[Sent Boxed Region for Analysis]</i>")
+            prompt = ""
+            self.chat_history.append("<b style='color:#60a5fa;'>You:</b> <i>[Sent Boxed Region]</i>")
 
         self.chat_history.append("<i style='color:#a1a1aa;'>Thinking...</i>")
 

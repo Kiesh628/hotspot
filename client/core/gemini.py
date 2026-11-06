@@ -31,7 +31,8 @@ class GeminiClient:
 
     def ask_screen(self, prompt: str, jpeg_bytes: bytes) -> str:
         """
-        Sends the current screen image and the user's question to Gemini 2.0 Flash.
+        Sends the current screen image and the optional user question to Gemini.
+        If prompt is empty, sends the image alone.
         """
         if not self.api_key:
             return "Error: No Gemini API key provided."
@@ -39,24 +40,28 @@ class GeminiClient:
         b64_image = base64.b64encode(jpeg_bytes).decode("utf-8")
         models = ["gemini-2.0-flash", "gemini-1.5-flash"]
 
+        parts = []
+        clean_prompt = prompt.strip() if prompt else ""
+        if clean_prompt:
+            parts.append({
+                "text": (
+                    "You are an AI pairing and remote assistant viewing the user's friend's screen. "
+                    "Provide clear, concise, actionable advice or answers based on what is visible. "
+                    f"\n\nQuestion from user: {clean_prompt}"
+                )
+            })
+
+        parts.append({
+            "inline_data": {
+                "mime_type": "image/jpeg",
+                "data": b64_image
+            }
+        })
+
         payload = {
             "contents": [
                 {
-                    "parts": [
-                        {
-                            "text": (
-                                "You are an AI pairing and remote assistant viewing the user's friend's screen. "
-                                "Provide clear, concise, actionable advice or answers based on what is visible. "
-                                f"\n\nQuestion from user: {prompt.strip()}"
-                            )
-                        },
-                        {
-                            "inline_data": {
-                                "mime_type": "image/jpeg",
-                                "data": b64_image
-                            }
-                        }
-                    ]
+                    "parts": parts
                 }
             ],
             "generationConfig": {
