@@ -2,16 +2,20 @@ import os
 import random
 import string
 import threading
+import sounddevice as sd
+import cv2
+
 from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtGui import QIcon, QFont, QPixmap, QPainter, QColor
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QLabel,
-    QLineEdit, QPushButton, QFrame, QSystemTrayIcon, QMenu, QApplication
+    QLineEdit, QPushButton, QComboBox, QFrame, QSystemTrayIcon, QMenu, QApplication
 )
 
 from config import load_config, save_config, generate_random_code, validate_keybind_uniqueness
 from ui.keybind_widget import MinecraftKeybindButton
 from ui.connector_window import ConnectorWindow
+from ui.device_preview import AudioMonitor, CameraPreviewThread, VolumeBar, CameraThumbnail
 from core.network import ConnecteeClient, ConnectorClient
 from core.capturer import ScreenCapturer
 from core.media_streamer import WebcamCapturer, AudioCapturer
@@ -24,7 +28,7 @@ def create_tray_icon_pixmap() -> QPixmap:
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.setBrush(QColor("#3b82f6")) # Blue circle
+    painter.setBrush(QColor("#3b82f6"))
     painter.setPen(Qt.PenStyle.NoPen)
     painter.drawEllipse(2, 2, 28, 28)
     painter.setBrush(QColor("#ffffff"))
@@ -37,7 +41,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.config = load_config()
         self.setWindowTitle("Hotspot")
-        self.setFixedSize(820, 560)
+        self.setFixedSize(850, 680)
 
         # Ensure code exists
         if not self.config.get("saved_code"):
@@ -51,6 +55,10 @@ class MainWindow(QMainWindow):
         self.audio_capturer: AudioCapturer = None
         self.connector_window: ConnectorWindow = None
         self.connector_client: ConnectorClient = None
+
+        # Device previews
+        self.audio_monitor = AudioMonitor()
+        self.cam_preview_thread = None
 
         # Build UI
         self._setup_style()
@@ -80,10 +88,10 @@ class MainWindow(QMainWindow):
         self.connectee_client.signals.connector_joined.connect(self._on_connector_joined)
         self.connectee_client.signals.code_reset.connect(self._on_host_code_reset)
 
-        # Start Connectee
+        # Start Connectee Services
         self.connectee_client.start()
 
-        # Capturer thread pushes screen frames into connectee's queue
+        # Screen capturer
         self.capturer = ScreenCapturer(
             frame_queue=self.connectee_client.frame_queue,
             loop=self.connectee_client.loop,
@@ -91,24 +99,8 @@ class MainWindow(QMainWindow):
         )
         self.capturer.start()
 
-        # Connectee Media Capturers (Webcam & Mic)
-        self.webcam_capturer = WebcamCapturer(
-            frame_queue=self.connectee_client.frame_queue,
-            loop=self.connectee_client.loop,
-            target_fps=15
-        )
-        self.webcam_capturer.start()
-        self.connectee_client.webcam_capturer = self.webcam_capturer
-        self.connectee_client.camera_available = self.webcam_capturer.is_available
-
-        self.audio_capturer = AudioCapturer(
-            audio_queue=self.connectee_client.frame_queue,
-            loop=self.connectee_client.loop,
-            samplerate=16000
-        )
-        self.audio_capturer.start()
-        self.connectee_client.audio_capturer = self.audio_capturer
-        self.connectee_client.mic_available = self.audio_capturer.is_available
+        # Scan and initialize devices
+        self._init_hardware_devices()
 
     def _setup_style(self):
         self.setStyleSheet("""
@@ -122,16 +114,20 @@ class MainWindow(QMainWindow):
             QLabel {
                 font-size: 13px;
             }
-            QLineEdit {
+            QLineEdit, QComboBox {
                 background-color: #18181b;
                 border: 1px solid #27272a;
                 border-radius: 6px;
-                padding: 8px 12px;
+                padding: 6px 10px;
                 color: #fafafa;
-                font-size: 13px;
+                font-size: 12px;
             }
-            QLineEdit:focus {
+            QLineEdit:focus, QComboBox:focus {
                 border-color: #3b82f6;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 20px;
             }
             QPushButton.primary-btn {
                 background-color: #2563eb;
@@ -162,13 +158,13 @@ class MainWindow(QMainWindow):
         central_widget = QWidget(self)
         self.setCentralWidget(central_widget)
         main_layout = QHBoxLayout(central_widget)
-        main_layout.setContentsMargins(24, 20, 24, 20)
+        main_layout.setContentsMargins(20, 16, 20, 16)
         main_layout.setSpacing(20)
 
         # ================= LEFT HALF: CONNECTOR =================
         left_box = QWidget()
         left_layout = QVBoxLayout(left_box)
-        left_layout.setContentsMargins(12, 12, 12, 12)
+        left_layout.setContentsMargins(10, 10, 10, 10)
         left_layout.setSpacing(10)
 
         conn_title = QLabel("Connect to Friend")
@@ -245,8 +241,8 @@ class MainWindow(QMainWindow):
         # ================= RIGHT HALF: CONNECTEE =================
         right_box = QWidget()
         right_layout = QVBoxLayout(right_box)
-        right_layout.setContentsMargins(12, 12, 12, 12)
-        right_layout.setSpacing(10)
+        right_layout.setContentsMargins(10, 10, 10, 10)
+        right_layout.setSpacing(8)
 
         host_title = QLabel("Your Device (Connectee)")
         host_title.setStyleSheet("font-size: 17px; font-weight: 700; color: #34d399;")
@@ -275,10 +271,10 @@ class MainWindow(QMainWindow):
             background-color: #18181b;
             border: 1px dashed #3f3f46;
             border-radius: 8px;
-            padding: 8px 16px;
-            font-size: 24px;
+            padding: 6px 14px;
+            font-size: 22px;
             font-weight: 800;
-            letter-spacing: 7px;
+            letter-spacing: 6px;
             color: #38bdf8;
         """)
         code_box.addWidget(self.lbl_my_code)
@@ -320,8 +316,139 @@ class MainWindow(QMainWindow):
         self.lbl_keybind_error.setStyleSheet("color: #ef4444; font-size: 11px; font-weight: bold;")
         right_layout.addWidget(self.lbl_keybind_error)
 
+        # Hardware Devices Section
+        hw_header = QLabel("HARDWARE FEED PREVIEWS")
+        hw_header.setStyleSheet("font-weight: 600; font-size: 11px; color: #71717a; letter-spacing: 1px; margin-top: 4px;")
+        right_layout.addWidget(hw_header)
+
+        # Camera selector & Preview
+        cam_section = QHBoxLayout()
+        cam_left = QVBoxLayout()
+        cam_left.addWidget(QLabel("Camera Device:"))
+        self.combo_cam = QComboBox()
+        self.combo_cam.currentIndexChanged.connect(self._on_camera_selected)
+        cam_left.addWidget(self.combo_cam)
+        cam_left.addStretch()
+        cam_section.addLayout(cam_left)
+
+        self.cam_thumbnail = CameraThumbnail()
+        cam_section.addWidget(self.cam_thumbnail)
+        right_layout.addLayout(cam_section)
+
+        # Microphone selector & Volume Bar
+        mic_section = QVBoxLayout()
+        mic_section.addWidget(QLabel("Microphone Device:"))
+        self.combo_mic = QComboBox()
+        self.combo_mic.currentIndexChanged.connect(self._on_mic_selected)
+        mic_section.addWidget(self.combo_mic)
+
+        self.volume_bar = VolumeBar()
+        mic_section.addWidget(self.volume_bar)
+        right_layout.addLayout(mic_section)
+
+        # Connect volume monitor signal
+        self.audio_monitor.volume_changed.connect(self.volume_bar.setValue)
+
         right_layout.addStretch()
         main_layout.addWidget(right_box)
+
+    def _init_hardware_devices(self):
+        # 1. Microphones
+        try:
+            devices = sd.query_devices()
+            input_devices = []
+            seen_names = set()
+            for i, d in enumerate(devices):
+                name = d.get("name", "").strip()
+                if d.get("max_input_channels", 0) > 0 and name not in seen_names:
+                    seen_names.add(name)
+                    input_devices.append((i, name))
+
+            self.combo_mic.clear()
+            if input_devices:
+                for idx, name in input_devices:
+                    self.combo_mic.addItem(name, idx)
+                self.audio_monitor.start(input_devices[0][0])
+            else:
+                self.combo_mic.addItem("No microphone detected", None)
+                self.combo_mic.setEnabled(False)
+        except Exception:
+            self.combo_mic.addItem("No microphone detected", None)
+            self.combo_mic.setEnabled(False)
+
+        # 2. Cameras (Scan indices in background)
+        def scan_cams():
+            detected_cams = []
+            for i in range(4):
+                try:
+                    cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+                    if not cap.isOpened():
+                        cap = cv2.VideoCapture(i)
+                    if cap.isOpened():
+                        detected_cams.append(i)
+                        cap.release()
+                except Exception:
+                    pass
+
+            QTimer.singleShot(0, lambda: self._on_cameras_scanned(detected_cams))
+
+        threading.Thread(target=scan_cams, daemon=True).start()
+
+    def _on_cameras_scanned(self, detected_indices):
+        self.combo_cam.clear()
+        if detected_indices:
+            for i in detected_indices:
+                self.combo_cam.addItem(f"Camera {i}", i)
+            self._start_camera_preview(detected_indices[0])
+        else:
+            self.combo_cam.addItem("No camera detected", None)
+            self.combo_cam.setEnabled(False)
+
+    def _start_camera_preview(self, cam_idx):
+        if self.cam_preview_thread:
+            self.cam_preview_thread.stop()
+            self.cam_preview_thread = None
+
+        if cam_idx is not None:
+            self.cam_preview_thread = CameraPreviewThread(
+                callback=self.cam_thumbnail.set_frame,
+                device_index=cam_idx
+            )
+            self.cam_preview_thread.start()
+
+    def _on_camera_selected(self, index):
+        cam_idx = self.combo_cam.currentData()
+        if cam_idx is not None:
+            self._start_camera_preview(cam_idx)
+            # Recreate connectee webcam capturer with selected index
+            if self.webcam_capturer:
+                self.webcam_capturer.stop()
+            self.webcam_capturer = WebcamCapturer(
+                frame_queue=self.connectee_client.frame_queue,
+                loop=self.connectee_client.loop,
+                target_fps=15,
+                camera_index=cam_idx
+            )
+            self.webcam_capturer.start()
+            self.connectee_client.webcam_capturer = self.webcam_capturer
+            self.connectee_client.camera_available = self.webcam_capturer.is_available
+
+    def _on_mic_selected(self, index):
+        mic_idx = self.combo_mic.currentData()
+        if mic_idx is not None:
+            self.audio_monitor.start(mic_idx)
+            # Recreate connectee audio capturer with selected index
+            if self.audio_capturer:
+                self.audio_capturer.stop()
+            self.audio_capturer = AudioCapturer(
+                audio_queue=self.connectee_client.frame_queue,
+                loop=self.connectee_client.loop,
+                samplerate=16000,
+                mic_device_index=mic_idx
+            )
+            self.audio_capturer.start()
+            self.connectee_client.audio_capturer = self.audio_capturer
+            self.connectee_client.mic_available = self.audio_capturer.is_available
 
     def _on_verify_key_clicked(self):
         key = self.input_api_key.text().strip()
@@ -438,7 +565,7 @@ class MainWindow(QMainWindow):
 
     def _on_connector_joined_success(self, code: str, nickname: str, is_blocked: bool):
         self.lbl_connector_status.setText("")
-        # Open fullscreen connector window
+        # Open fullscreen connector window with host nickname
         self.connector_window = ConnectorWindow(
             connector_client=self.connector_client,
             nickname=nickname,
@@ -457,6 +584,11 @@ class MainWindow(QMainWindow):
         save_config(self.config)
 
     def _on_connector_joined(self, count: int):
+        # Stop landing preview when connection is established
+        if self.cam_preview_thread:
+            self.cam_preview_thread.stop()
+            self.cam_preview_thread = None
+        self.audio_monitor.stop()
         self.hide()
 
     def _on_host_code_reset(self, new_code: str):
@@ -484,6 +616,9 @@ class MainWindow(QMainWindow):
         self.hide()
 
     def _full_exit(self):
+        if self.cam_preview_thread:
+            self.cam_preview_thread.stop()
+        self.audio_monitor.stop()
         if self.capturer:
             self.capturer.stop()
         if self.webcam_capturer:

@@ -1,7 +1,7 @@
 import threading
-from PySide6.QtCore import Qt, QTimer, QEvent
+from PySide6.QtCore import Qt, QTimer, QEvent, QRect, QPoint, QByteArray, QBuffer, QIODevice, Signal
 from PySide6.QtGui import (
-    QPainter, QPixmap, QImage, QColor, QFont, QKeyEvent, QMouseEvent, QWheelEvent
+    QPainter, QPixmap, QImage, QColor, QFont, QPen, QBrush, QKeyEvent, QMouseEvent, QWheelEvent
 )
 from PySide6.QtWidgets import (
     QWidget, QLabel, QPushButton, QHBoxLayout, QVBoxLayout,
@@ -13,12 +13,20 @@ from core.gemini import GeminiClient
 from core.media_streamer import AudioPlayer
 
 class RemoteCanvas(QWidget):
+    region_selected = Signal(bytes) # Emits cropped JPEG bytes when a region is boxed
+
     def __init__(self, connector_client, get_mode_fn, parent=None):
         super().__init__(parent)
         self.client = connector_client
         self.get_mode_fn = get_mode_fn # Returns "control" or "select"
         self.current_pixmap: QPixmap = QPixmap()
         self.latest_jpeg_bytes: bytes = b""
+
+        # Drag-to-select variables
+        self.selection_start: QPoint = None
+        self.selection_current: QPoint = None
+        self.is_selecting = False
+
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
@@ -30,55 +38,53 @@ class RemoteCanvas(QWidget):
             self.current_pixmap = QPixmap.fromImage(image)
             self.update()
 
+    def _get_render_rect(self):
+        if self.current_pixmap.isNull():
+            return QRect()
+        scaled = self.current_pixmap.scaled(
+            self.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        x = (self.width() - scaled.width()) // 2
+        y = (self.height() - scaled.height()) // 2
+        return QRect(x, y, scaled.width(), scaled.height())
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor(10, 10, 12))
 
         if not self.current_pixmap.isNull():
+            render_rect = self._get_render_rect()
             scaled = self.current_pixmap.scaled(
-                self.size(),
+                render_rect.size(),
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation
             )
-            x = (self.width() - scaled.width()) // 2
-            y = (self.height() - scaled.height()) // 2
-            painter.drawPixmap(x, y, scaled)
+            painter.drawPixmap(render_rect.x(), render_rect.y(), scaled)
+
+            # Draw selection rectangle if active in select mode
+            if self.is_selecting and self.selection_start and self.selection_current:
+                sel_rect = QRect(self.selection_start, self.selection_current).normalized()
+                painter.fillRect(sel_rect, QColor(59, 130, 246, 60))
+                pen = QPen(QColor(96, 165, 250), 2, Qt.PenStyle.DashLine)
+                painter.setPen(pen)
+                painter.drawRect(sel_rect)
         else:
             painter.setPen(QColor(160, 160, 160))
             painter.setFont(QFont("Segoe UI", 16))
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Waiting for screen stream...")
 
     def _get_normalized_pos(self, local_x: int, local_y: int):
-        if self.current_pixmap.isNull():
-            return None, None
-        
-        scaled_w = self.width()
-        scaled_h = self.height()
-        orig_w = self.current_pixmap.width()
-        orig_h = self.current_pixmap.height()
-
-        aspect_orig = orig_w / orig_h
-        aspect_win = scaled_w / scaled_h
-
-        if aspect_win > aspect_orig:
-            render_h = scaled_h
-            render_w = int(render_h * aspect_orig)
-            offset_x = (scaled_w - render_w) // 2
-            offset_y = 0
-        else:
-            render_w = scaled_w
-            render_h = int(render_w / aspect_orig)
-            offset_x = 0
-            offset_y = (scaled_h - render_h) // 2
-
-        if render_w == 0 or render_h == 0:
+        render_rect = self._get_render_rect()
+        if render_rect.isEmpty():
             return None, None
 
-        img_x = local_x - offset_x
-        img_y = local_y - offset_y
+        img_x = local_x - render_rect.x()
+        img_y = local_y - render_rect.y()
 
-        if 0 <= img_x <= render_w and 0 <= img_y <= render_h:
-            return img_x / render_w, img_y / render_h
+        if 0 <= img_x <= render_rect.width() and 0 <= img_y <= render_rect.height():
+            return img_x / render_rect.width(), img_y / render_rect.height()
         return None, None
 
     def mouseMoveEvent(self, event: QMouseEvent):
@@ -86,6 +92,9 @@ class RemoteCanvas(QWidget):
             nx, ny = self._get_normalized_pos(event.position().x(), event.position().y())
             if nx is not None and ny is not None:
                 self.client.send_input({"event": "mouse_move", "x": nx, "y": ny})
+        elif self.get_mode_fn() == "select" and self.is_selecting:
+            self.selection_current = event.position().toPoint()
+            self.update()
         super().mouseMoveEvent(event)
 
     def mousePressEvent(self, event: QMouseEvent):
@@ -95,6 +104,11 @@ class RemoteCanvas(QWidget):
                 btn = "left" if event.button() == Qt.MouseButton.LeftButton else \
                       "right" if event.button() == Qt.MouseButton.RightButton else "middle"
                 self.client.send_input({"event": "mouse_down", "button": btn, "x": nx, "y": ny})
+        elif self.get_mode_fn() == "select" and event.button() == Qt.MouseButton.LeftButton:
+            self.selection_start = event.position().toPoint()
+            self.selection_current = self.selection_start
+            self.is_selecting = True
+            self.update()
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent):
@@ -104,6 +118,35 @@ class RemoteCanvas(QWidget):
                 btn = "left" if event.button() == Qt.MouseButton.LeftButton else \
                       "right" if event.button() == Qt.MouseButton.RightButton else "middle"
                 self.client.send_input({"event": "mouse_up", "button": btn, "x": nx, "y": ny})
+        elif self.get_mode_fn() == "select" and self.is_selecting:
+            self.is_selecting = False
+            sel_rect = QRect(self.selection_start, self.selection_current).normalized()
+            render_rect = self._get_render_rect()
+
+            if not self.current_pixmap.isNull() and not render_rect.isEmpty():
+                intersect = sel_rect.intersected(render_rect)
+                if intersect.width() > 15 and intersect.height() > 15:
+                    orig_w = self.current_pixmap.width()
+                    orig_h = self.current_pixmap.height()
+                    scale_x = orig_w / render_rect.width()
+                    scale_y = orig_h / render_rect.height()
+
+                    crop_x = int((intersect.x() - render_rect.x()) * scale_x)
+                    crop_y = int((intersect.y() - render_rect.y()) * scale_y)
+                    crop_w = int(intersect.width() * scale_x)
+                    crop_h = int(intersect.height() * scale_y)
+
+                    cropped = self.current_pixmap.copy(crop_x, crop_y, crop_w, crop_h)
+                    ba = QByteArray()
+                    buf = QBuffer(ba)
+                    buf.open(QIODevice.OpenModeFlag.WriteOnly)
+                    cropped.save(buf, "JPG")
+                    self.region_selected.emit(ba.data())
+
+            self.selection_start = None
+            self.selection_current = None
+            self.update()
+
         super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event: QWheelEvent):
@@ -179,35 +222,37 @@ class WebcamBox(QLabel):
 
 
 class ConnectorWindow(QWidget):
-    def __init__(self, connector_client, nickname: str = "Friend", is_blocked: bool = False, gemini_api_key: str = "", mode_key: str = "None", parent=None):
+    def __init__(self, connector_client, nickname: str = "", is_blocked: bool = False, gemini_api_key: str = "", mode_key: str = "None", parent=None):
         super().__init__(parent)
         self.client = connector_client
-        self.nickname = nickname
+        self.nickname = nickname.strip() if nickname else ""
         self.is_blocked = is_blocked
         self.gemini_api_key = gemini_api_key
         self.mode_key = mode_key if mode_key else "None"
-        self.current_mode = "control" # "control" or "select"
+        self.current_mode = "control"
 
         # Media states
-        self.cam_state = "active" # "active", "muted", "error"
-        self.mic_state = "active" # "active", "muted", "error"
+        self.cam_state = "active"
+        self.mic_state = "active"
 
         # Subsystems
         self.gemini = GeminiClient(gemini_api_key) if gemini_api_key else None
         self.audio_player = AudioPlayer()
 
-        self.setWindowTitle(f"Hotspot — Viewing {nickname}")
+        # Window Title: Nickname if available, else Hotspot
+        app_title = self.nickname if self.nickname else "Hotspot"
+        self.setWindowTitle(app_title)
         self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
         self.showMaximized()
 
-        self._build_ui()
+        self._build_ui(app_title)
         self._bind_signals()
-        self._show_welcome_popup(nickname)
+        self._show_welcome_popup(app_title)
 
         if self.is_blocked:
             self.freeze_banner.show()
 
-    def _build_ui(self):
+    def _build_ui(self, app_title: str):
         root_layout = QVBoxLayout(self)
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
@@ -236,8 +281,8 @@ class ConnectorWindow(QWidget):
         self.btn_mode_toggle.clicked.connect(self.toggle_mode)
         bar_layout.addWidget(self.btn_mode_toggle)
 
-        title_lbl = QLabel(f"Hotspot — {self.nickname}'s Screen")
-        title_lbl.setStyleSheet("color: #a1a1aa; font-size: 12px; font-weight: 500; margin-left: 8px;")
+        title_lbl = QLabel(app_title)
+        title_lbl.setStyleSheet("color: #a1a1aa; font-size: 12px; font-weight: 600; margin-left: 8px;")
         bar_layout.addWidget(title_lbl)
 
         bar_layout.addStretch()
@@ -277,6 +322,7 @@ class ConnectorWindow(QWidget):
 
         # Left Canvas
         self.canvas = RemoteCanvas(self.client, lambda: self.current_mode, self)
+        self.canvas.region_selected.connect(self._on_region_selected)
         self.splitter.addWidget(self.canvas)
 
         # Right Sidebar
@@ -286,7 +332,7 @@ class ConnectorWindow(QWidget):
         sidebar_layout.setContentsMargins(10, 10, 10, 10)
         sidebar_layout.setSpacing(10)
 
-        # Media Controls Header (Discord Style: Icon-only buttons with hover tooltips)
+        # Media Controls Header (Discord Style)
         media_bar = QHBoxLayout()
         media_bar.setContentsMargins(0, 0, 0, 0)
         media_bar.setSpacing(8)
@@ -337,14 +383,14 @@ class ConnectorWindow(QWidget):
         if not self.gemini_api_key:
             self.chat_history.setHtml("<i style='color:#71717a;'>No Gemini API key provided. AI features are disabled.</i>")
         else:
-            self.chat_history.setHtml("<i style='color:#71717a;'>AI Assistant active. Type a question below to analyze the screen.</i>")
+            self.chat_history.setHtml("<i style='color:#71717a;'>AI active. In Select Mode, drag across screen or type below.</i>")
         sidebar_layout.addWidget(self.chat_history)
 
         # Prompt input + Ask button
         prompt_bar = QHBoxLayout()
         prompt_bar.setSpacing(6)
         self.prompt_input = QLineEdit()
-        self.prompt_input.setPlaceholderText("Ask AI about this screen...")
+        self.prompt_input.setPlaceholderText("Ask AI or drag-box screen in Select Mode...")
         self.prompt_input.setStyleSheet("""
             QLineEdit {
                 background-color: #18181b;
@@ -363,7 +409,7 @@ class ConnectorWindow(QWidget):
 
         self.btn_ask = QPushButton("➔")
         self.btn_ask.setFixedSize(32, 28)
-        self.btn_ask.setToolTip("Ask AI (snapshot screen)")
+        self.btn_ask.setToolTip("Ask AI with screen snapshot")
         self.btn_ask.setStyleSheet("""
             QPushButton {
                 background-color: #2563eb;
@@ -382,13 +428,13 @@ class ConnectorWindow(QWidget):
         sidebar_layout.addLayout(prompt_bar)
         self.splitter.addWidget(self.sidebar)
 
-        # Set initial splitter sizes (82% Canvas, 18% Sidebar)
+        # Initial splitter ratio: 82% Canvas, 18% Sidebar
         self.splitter.setStretchFactor(0, 82)
         self.splitter.setStretchFactor(1, 18)
         root_layout.addWidget(self.splitter)
 
         # Welcome popup pill
-        self.welcome_popup = QLabel(f"Connected to {self.nickname}", self)
+        self.welcome_popup = QLabel(f"Connected to {app_title}", self)
         self.welcome_popup.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.welcome_popup.setStyleSheet("""
             QLabel {
@@ -441,14 +487,13 @@ class ConnectorWindow(QWidget):
         if self.current_mode == "control":
             self.btn_mode_toggle.setToolTip(f"Mode: Remote Control (Click to switch to Select/AI Mode{hotkey_hint})")
         else:
-            self.btn_mode_toggle.setToolTip(f"Mode: Select / AI (Click to switch to Remote Control{hotkey_hint})")
+            self.btn_mode_toggle.setToolTip(f"Mode: Select / AI (Drag on screen to box-snip for AI, click to return to Control{hotkey_hint})")
 
     def toggle_mode(self):
         self.current_mode = "select" if self.current_mode == "control" else "control"
         self._update_mode_button_ui()
 
     def changeEvent(self, event):
-        # Auto-switch to Select Mode when app loses focus (Alt-Tab, click off, minimize)
         if event.type() == QEvent.Type.ActivationChange:
             if not self.isActiveWindow():
                 if self.current_mode == "control":
@@ -503,6 +548,28 @@ class ConnectorWindow(QWidget):
             self.btn_mic.setToolTip("Connectee has no microphone connected")
             self.btn_mic.setStyleSheet(self._media_btn_style("error"))
 
+    def _on_region_selected(self, cropped_jpeg_bytes: bytes):
+        if not self.gemini:
+            self.chat_history.append("<b style='color:#ef4444;'>AI:</b> No Gemini API key verified.")
+            return
+
+        user_text = self.prompt_input.text().strip()
+        if user_text:
+            prompt = user_text
+            self.prompt_input.clear()
+            self.chat_history.append(f"<b style='color:#60a5fa;'>You (Boxed Region):</b> {prompt}")
+        else:
+            prompt = "Analyze and explain what is in this selected area of the screen, point out any errors or important elements, and suggest what to do next."
+            self.chat_history.append(f"<b style='color:#60a5fa;'>You:</b> <i>[Sent Boxed Region for Analysis]</i>")
+
+        self.chat_history.append("<i style='color:#a1a1aa;'>Thinking...</i>")
+
+        def worker():
+            answer = self.gemini.ask_screen(prompt, cropped_jpeg_bytes)
+            QTimer.singleShot(0, lambda: self._append_ai_response(answer))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _ask_ai(self):
         prompt = self.prompt_input.text().strip()
         if not prompt:
@@ -522,13 +589,11 @@ class ConnectorWindow(QWidget):
 
         def worker():
             answer = self.gemini.ask_screen(prompt, jpeg_bytes)
-            # Remove "Thinking..." and append response
             QTimer.singleShot(0, lambda: self._append_ai_response(answer))
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _append_ai_response(self, text: str):
-        # Format markdown-like code or bolding
         formatted = text.replace("\n", "<br>").replace("`", "")
         self.chat_history.append(f"<b style='color:#34d399;'>AI:</b> {formatted}<br>")
 
@@ -551,8 +616,8 @@ class ConnectorWindow(QWidget):
     def _on_disconnected(self, reason: str):
         self.close()
 
-    def _show_welcome_popup(self, nickname: str):
-        self.welcome_popup.setText(f"Connected to {nickname}")
+    def _show_welcome_popup(self, app_title: str):
+        self.welcome_popup.setText(f"Connected to {app_title}")
         self.welcome_popup.adjustSize()
         self.welcome_popup.move((self.width() - self.welcome_popup.width()) // 2, 45)
         self.welcome_popup.show()

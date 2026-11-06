@@ -9,18 +9,21 @@ import logging
 logger = logging.getLogger("MediaStreamer")
 
 class WebcamCapturer(threading.Thread):
-    def __init__(self, frame_queue: asyncio.Queue, loop: asyncio.AbstractEventLoop, target_fps: int = 15):
+    def __init__(self, frame_queue: asyncio.Queue, loop: asyncio.AbstractEventLoop, target_fps: int = 15, camera_index: int = 0):
         super().__init__(daemon=True)
         self.frame_queue = frame_queue
         self.loop = loop
         self.target_fps = target_fps
+        self.camera_index = camera_index
         self._stop_event = threading.Event()
         self.is_enabled = True
         self.is_available = False
 
         # Probe camera
         try:
-            cap = cv2.VideoCapture(0)
+            cap = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW)
+            if not cap.isOpened():
+                cap = cv2.VideoCapture(self.camera_index)
             if cap.isOpened():
                 ret, _ = cap.read()
                 self.is_available = bool(ret)
@@ -32,7 +35,13 @@ class WebcamCapturer(threading.Thread):
         if not self.is_available:
             return
 
-        cap = cv2.VideoCapture(0)
+        try:
+            cap = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW)
+            if not cap.isOpened():
+                cap = cv2.VideoCapture(self.camera_index)
+        except Exception:
+            return
+
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
         interval = 1.0 / self.target_fps
@@ -65,10 +74,11 @@ class WebcamCapturer(threading.Thread):
 
 
 class AudioCapturer:
-    def __init__(self, audio_queue: asyncio.Queue, loop: asyncio.AbstractEventLoop, samplerate: int = 16000):
+    def __init__(self, audio_queue: asyncio.Queue, loop: asyncio.AbstractEventLoop, samplerate: int = 16000, mic_device_index=None):
         self.audio_queue = audio_queue
         self.loop = loop
         self.samplerate = samplerate
+        self.mic_device_index = mic_device_index
         self.is_enabled = True
         self.is_available = False
         self.stream = None
@@ -86,6 +96,7 @@ class AudioCapturer:
             return
         try:
             self.stream = sd.InputStream(
+                device=self.mic_device_index,
                 samplerate=self.samplerate,
                 channels=1,
                 dtype="int16",
