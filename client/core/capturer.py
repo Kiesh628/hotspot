@@ -52,7 +52,8 @@ class ScreenCapturer(threading.Thread):
 
                     # Encode to JPEG
                     _, buffer = cv2.imencode(".jpg", frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 65])
-                    jpeg_bytes = buffer.tobytes()
+                    # Tag with 0x01 header for screen frame
+                    jpeg_bytes = b"\x01" + buffer.tobytes()
 
                     # Push to asyncio queue if queue is not full (skip frame if lagging)
                     if self.frame_queue.qsize() < 2:

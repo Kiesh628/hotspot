@@ -15,8 +15,29 @@ DEFAULT_CONFIG = {
     "saved_code": "",
     "keybind_freeze": None,
     "keybind_kick": None,
+    "keybind_mode": None,
+    "gemini_api_key": "",
     "server_url": "wss://hotspot-relay-production.up.railway.app"
 }
+
+def validate_keybind_uniqueness(freeze_key, kick_key, mode_key) -> tuple[bool, str]:
+    """
+    Checks that none of the active keybinds collide.
+    'None' is allowed to be shared.
+    """
+    keys = [
+        ("Freeze Control", freeze_key),
+        ("Kick & Reset", kick_key),
+        ("Mode Switch", mode_key)
+    ]
+    seen = {}
+    for name, k in keys:
+        if k and k.lower() != "none":
+            clean_k = k.lower().strip()
+            if clean_k in seen:
+                return False, f"'{k.upper()}' is already assigned to {seen[clean_k]}!"
+            seen[clean_k] = name
+    return True, ""
 
 def load_config() -> dict:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)

@@ -13,11 +13,15 @@ class ConnecteeSignals(QObject):
     connector_joined = Signal(int) # count (used to auto-hide UI to tray)
     code_reset = Signal(str) # new_code
     connection_status = Signal(bool, str) # is_connected, message
+    media_control_received = Signal(bool, bool) # camera_enabled, mic_enabled
 
 class ConnectorSignals(QObject):
     joined = Signal(str, str, bool) # code, nickname, is_blocked
     join_error = Signal(str) # error_msg
-    frame_received = Signal(bytes) # binary jpeg bytes
+    screen_frame_received = Signal(bytes) # binary jpeg bytes
+    webcam_frame_received = Signal(bytes) # binary jpeg bytes
+    audio_chunk_received = Signal(bytes) # raw PCM bytes
+    media_status_received = Signal(bool, bool) # camera_available, mic_available
     control_blocked = Signal(bool) # is_blocked
     disconnected = Signal(str) # reason
 
@@ -36,6 +40,11 @@ class ConnecteeClient:
         self.running = False
         self.is_locally_blocked = False
 
+        self.camera_available = False
+        self.mic_available = False
+        self.webcam_capturer = None
+        self.audio_capturer = None
+
     def start(self):
         self.running = True
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
@@ -44,7 +53,7 @@ class ConnecteeClient:
     def _run_loop(self):
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
-        self.frame_queue = asyncio.Queue(maxsize=5)
+        self.frame_queue = asyncio.Queue(maxsize=15)
         self.loop.run_until_complete(self._connection_manager())
 
     async def _connection_manager(self):
@@ -65,6 +74,14 @@ class ConnecteeClient:
                         "type": "register_host",
                         "code": self.code,
                         "nickname": self.nickname
+                    }))
+
+                    # Announce media capabilities
+                    await ws.send(json.dumps({
+                        "type": "input", # Forwarded to connectors
+                        "event": "media_status",
+                        "camera_available": self.camera_available,
+                        "mic_available": self.mic_available
                     }))
 
                     # Run incoming message reader & frame sender concurrently
@@ -100,11 +117,27 @@ class ConnecteeClient:
                 elif msg_type == "connector_joined":
                     cnt = data.get("connector_count", 1)
                     self.signals.connector_joined.emit(cnt)
+                    # Resend media capabilities to newly joined connector
+                    await ws.send(json.dumps({
+                        "type": "input",
+                        "event": "media_status",
+                        "camera_available": self.camera_available,
+                        "mic_available": self.mic_available
+                    }))
                 elif msg_type == "code_reset":
                     self.code = data.get("code", self.code)
                     self.signals.code_reset.emit(self.code)
                 elif msg_type == "input":
-                    if not self.is_locally_blocked:
+                    event = data.get("event")
+                    if event == "media_control":
+                        cam_en = data.get("camera", True)
+                        mic_en = data.get("mic", True)
+                        self.signals.media_control_received.emit(cam_en, mic_en)
+                        if self.webcam_capturer:
+                            self.webcam_capturer.set_enabled(cam_en)
+                        if self.audio_capturer:
+                            self.audio_capturer.set_enabled(mic_en)
+                    elif not self.is_locally_blocked:
                         self._handle_remote_input(data)
 
     def _handle_remote_input(self, data: dict):
@@ -127,11 +160,11 @@ class ConnecteeClient:
 
     async def _frame_sender(self, ws):
         while self.running:
-            frame_bytes = await self.frame_queue.get()
+            packet_bytes = await self.frame_queue.get()
             try:
-                await ws.send(frame_bytes)
+                await ws.send(packet_bytes)
             except Exception as e:
-                logger.warning(f"Error sending frame: {e}")
+                logger.warning(f"Error sending frame/audio packet: {e}")
                 break
 
     def toggle_freeze(self) -> bool:
@@ -207,8 +240,18 @@ class ConnectorClient:
 
                 async for raw_message in ws:
                     if isinstance(raw_message, bytes):
-                        # Video frame
-                        self.signals.frame_received.emit(raw_message)
+                        # Demux based on first byte
+                        header = raw_message[:1]
+                        payload = raw_message[1:]
+                        if header == b"\x01":
+                            self.signals.screen_frame_received.emit(payload)
+                        elif header == b"\x02":
+                            self.signals.webcam_frame_received.emit(payload)
+                        elif header == b"\x03":
+                            self.signals.audio_chunk_received.emit(payload)
+                        else:
+                            # Fallback (raw frame)
+                            self.signals.screen_frame_received.emit(raw_message)
                         continue
 
                     try:
@@ -223,6 +266,10 @@ class ConnectorClient:
                             data.get("nickname", "Friend"),
                             bool(data.get("is_blocked", False))
                         )
+                    elif msg_type == "input" and data.get("event") == "media_status":
+                        cam_avail = bool(data.get("camera_available", False))
+                        mic_avail = bool(data.get("mic_available", False))
+                        self.signals.media_status_received.emit(cam_avail, mic_avail)
                     elif msg_type == "join_error":
                         self.signals.join_error.emit(data.get("message", "Failed to join room"))
                         break
@@ -244,6 +291,13 @@ class ConnectorClient:
         if self.ws and self.loop and self.loop.is_running():
             msg = json.dumps({"type": "input", **payload})
             asyncio.run_coroutine_threadsafe(self.ws.send(msg), self.loop)
+
+    def send_media_control(self, camera: bool, mic: bool):
+        self.send_input({
+            "event": "media_control",
+            "camera": camera,
+            "mic": mic
+        })
 
     def disconnect(self):
         self.running = False
