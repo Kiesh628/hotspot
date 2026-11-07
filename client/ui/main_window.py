@@ -300,16 +300,10 @@ class MainWindow(QMainWindow):
         code_box = QHBoxLayout()
         self.lbl_my_code = QLabel(self.config.get("saved_code", "----"))
         self.lbl_my_code.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_my_code.setStyleSheet("""
-            background-color: #18181b;
-            border: 1px dashed #3f3f46;
-            border-radius: 8px;
-            padding: 6px 14px;
-            font-size: 22px;
-            font-weight: 800;
-            letter-spacing: 6px;
-            color: #38bdf8;
-        """)
+        self.lbl_my_code.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.lbl_my_code.setToolTip("Click to copy room code")
+        self.lbl_my_code.setStyleSheet(self._code_style(copied=False))
+        self.lbl_my_code.mousePressEvent = self._on_my_code_clicked
         code_box.addWidget(self.lbl_my_code)
 
         btn_reset_code = QPushButton("Reset Code")
@@ -628,13 +622,63 @@ class MainWindow(QMainWindow):
             gemini_api_key=self.config.get("gemini_api_key", ""),
             mode_key=self.config.get("keybind_mode", "None")
         )
+        self.connector_window.closed.connect(self._on_connector_window_closed)
         self.connector_window.show()
+        # Hide landing window while connector session is active
+        self.hide()
+
+    def _on_connector_window_closed(self):
+        # Reopen landing window when connector session ends
+        self.connector_window = None
+        self.show_and_activate()
 
     def _on_connector_join_error(self, err_msg: str):
         self.lbl_connector_status.setText(err_msg)
 
+    def _code_style(self, copied: bool = False) -> str:
+        if copied:
+            return """
+                background-color: #064e3b;
+                border: 1px solid #10b981;
+                border-radius: 8px;
+                padding: 6px 14px;
+                font-size: 20px;
+                font-weight: 800;
+                letter-spacing: 4px;
+                color: #a7f3d0;
+            """
+        return """
+            QLabel {
+                background-color: #18181b;
+                border: 1px dashed #3f3f46;
+                border-radius: 8px;
+                padding: 6px 14px;
+                font-size: 22px;
+                font-weight: 800;
+                letter-spacing: 6px;
+                color: #38bdf8;
+            }
+            QLabel:hover {
+                background-color: #27272a;
+                border: 1px solid #38bdf8;
+            }
+        """
+
+    def _on_my_code_clicked(self, event):
+        code = self.lbl_my_code.text().strip()
+        if code and code not in ("----", "COPIED!"):
+            QApplication.clipboard().setText(code)
+            current_code = code
+            self.lbl_my_code.setText("COPIED!")
+            self.lbl_my_code.setStyleSheet(self._code_style(copied=True))
+            QTimer.singleShot(1200, lambda: (
+                self.lbl_my_code.setText(self.config.get("saved_code", current_code)),
+                self.lbl_my_code.setStyleSheet(self._code_style(copied=False))
+            ))
+
     def _on_host_registered(self, code: str, nickname: str):
         self.lbl_my_code.setText(code)
+        self.lbl_my_code.setStyleSheet(self._code_style(copied=False))
         self.config["saved_code"] = code
         save_config(self.config)
 
@@ -703,6 +747,7 @@ class MainWindow(QMainWindow):
 
     def _on_host_code_reset(self, new_code: str):
         self.lbl_my_code.setText(new_code)
+        self.lbl_my_code.setStyleSheet(self._code_style(copied=False))
         self.config["saved_code"] = new_code
         save_config(self.config)
         self._stop_media_capturers()

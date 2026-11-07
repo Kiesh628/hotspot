@@ -226,6 +226,8 @@ class WebcamBox(QLabel):
 
 
 class ConnectorWindow(QWidget):
+    closed = Signal()
+
     def __init__(self, connector_client, nickname: str = "", is_blocked: bool = False, gemini_api_key: str = "", mode_key: str = "None", parent=None):
         super().__init__(parent)
         self.client = connector_client
@@ -676,4 +678,5 @@ class ConnectorWindow(QWidget):
     def closeEvent(self, event):
         self.audio_player.stop()
         self.client.disconnect()
+        self.closed.emit()
         super().closeEvent(event)
