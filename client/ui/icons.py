@@ -153,3 +153,33 @@ def create_eye_icon(visible: bool = True, size: int = 20) -> QIcon:
 
     painter.end()
     return QIcon(pixmap)
+
+
+def create_sidebar_icon(visible: bool = True, size: int = 20) -> QIcon:
+    """
+    Renders a vector icon representing a window sidebar partition toggle.
+    """
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    color = QColor("#a1a1aa") if visible else QColor("#52525b")
+    pen = QPen(color, 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+
+    # Outer window frame
+    frame = QRectF(size * 0.15, size * 0.15, size * 0.7, size * 0.7)
+    painter.drawRoundedRect(frame, size * 0.1, size * 0.1)
+
+    # Vertical partition dividing canvas and sidebar
+    partition_x = size * 0.62
+    painter.drawLine(QPointF(partition_x, size * 0.15), QPointF(partition_x, size * 0.85))
+
+    # Fill sidebar portion if visible
+    if visible:
+        painter.fillRect(QRectF(partition_x, size * 0.15, size * 0.23, size * 0.7), QColor(96, 165, 250, 90))
+
+    painter.end()
+    return QIcon(pixmap)

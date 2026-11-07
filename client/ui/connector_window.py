@@ -5,10 +5,10 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QWidget, QLabel, QPushButton, QHBoxLayout, QVBoxLayout,
-    QSplitter, QTextEdit, QLineEdit, QScrollArea, QFrame, QApplication
+    QSplitter, QTextEdit, QLineEdit, QScrollArea, QFrame, QApplication, QSizePolicy
 )
 
-from ui.icons import create_mic_icon, create_cam_icon, create_mode_icon
+from ui.icons import create_mic_icon, create_cam_icon, create_mode_icon, create_sidebar_icon
 from core.gemini import GeminiClient
 from core.media_streamer import AudioPlayer
 
@@ -30,6 +30,8 @@ class RemoteCanvas(QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMinimumSize(400, 300)
 
     def update_frame(self, jpeg_bytes: bytes):
         self.latest_jpeg_bytes = jpeg_bytes
@@ -250,6 +252,8 @@ class ConnectorWindow(QWidget):
         self._build_ui(app_title)
         self._bind_signals()
         self.showMaximized()
+        # Enforce initial splitter proportion (Canvas takes all remaining space, Sidebar starts at 320px)
+        self.splitter.setSizes([max(600, self.width() - 320), 320])
         self._show_welcome_popup(app_title)
 
         if self.is_blocked:
@@ -290,6 +294,23 @@ class ConnectorWindow(QWidget):
 
         bar_layout.addStretch()
 
+        self.btn_sidebar_toggle = QPushButton()
+        self.btn_sidebar_toggle.setFixedSize(28, 24)
+        self.btn_sidebar_toggle.setIcon(create_sidebar_icon(True))
+        self.btn_sidebar_toggle.setToolTip("Toggle Sidebar (AI Chat & Controls)")
+        self.btn_sidebar_toggle.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                border: 1px solid #3f3f46;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #27272a;
+            }
+        """)
+        self.btn_sidebar_toggle.clicked.connect(self._toggle_sidebar)
+        bar_layout.addWidget(self.btn_sidebar_toggle)
+
         close_btn = QPushButton("✕")
         close_btn.setFixedSize(28, 24)
         close_btn.setStyleSheet("""
@@ -328,8 +349,11 @@ class ConnectorWindow(QWidget):
         self.canvas.region_selected.connect(self._on_region_selected)
         self.splitter.addWidget(self.canvas)
 
-        # Right Sidebar
+        # Right Sidebar (Clamped between 260px and 460px so it cannot expand on its own)
         self.sidebar = QWidget()
+        self.sidebar.setMinimumWidth(260)
+        self.sidebar.setMaximumWidth(460)
+        self.sidebar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         self.sidebar.setStyleSheet("background-color: #111113; border-left: 1px solid #1f1f23;")
         sidebar_layout = QVBoxLayout(self.sidebar)
         sidebar_layout.setContentsMargins(10, 10, 10, 10)
@@ -372,6 +396,8 @@ class ConnectorWindow(QWidget):
         # AI Chat History
         self.chat_history = QTextEdit()
         self.chat_history.setReadOnly(True)
+        self.chat_history.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self.chat_history.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         self.chat_history.setStyleSheet("""
             QTextEdit {
                 background-color: #18181b;
@@ -431,9 +457,12 @@ class ConnectorWindow(QWidget):
         sidebar_layout.addLayout(prompt_bar)
         self.splitter.addWidget(self.sidebar)
 
-        # Initial splitter ratio: 82% Canvas, 18% Sidebar
-        self.splitter.setStretchFactor(0, 82)
-        self.splitter.setStretchFactor(1, 18)
+        # Splitter behavior: Canvas gets 100% of resize stretch (factor 1), Sidebar gets 0% (factor 0)
+        self.splitter.setCollapsible(0, False)
+        self.splitter.setCollapsible(1, False)
+        self.splitter.setStretchFactor(0, 1)
+        self.splitter.setStretchFactor(1, 0)
+        self.splitter.setSizes([1600, 320])
         root_layout.addWidget(self.splitter)
 
         # Welcome popup pill
@@ -495,6 +524,17 @@ class ConnectorWindow(QWidget):
     def toggle_mode(self):
         self.current_mode = "select" if self.current_mode == "control" else "control"
         self._update_mode_button_ui()
+
+    def _toggle_sidebar(self):
+        if self.sidebar.isVisible():
+            self.sidebar.hide()
+            self.btn_sidebar_toggle.setIcon(create_sidebar_icon(False))
+            self.btn_sidebar_toggle.setToolTip("Show Sidebar (AI Chat & Controls)")
+        else:
+            self.sidebar.show()
+            self.splitter.setSizes([max(600, self.width() - 320), 320])
+            self.btn_sidebar_toggle.setIcon(create_sidebar_icon(True))
+            self.btn_sidebar_toggle.setToolTip("Hide Sidebar")
 
     def changeEvent(self, event):
         if event.type() == QEvent.Type.ActivationChange:
