@@ -567,6 +567,7 @@ class MainWindow(QMainWindow):
     def show_and_activate(self):
         self.showNormal()
         self.activateWindow()
+        self.raise_()
 
     def _on_connect_clicked(self):
         code = self.input_code.text().strip().upper()
