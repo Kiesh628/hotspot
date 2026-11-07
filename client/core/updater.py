@@ -7,7 +7,7 @@ import logging
 logger = logging.getLogger("HotspotUpdater")
 
 REPO = "Kiesh628/hotspot"
-CURRENT_VERSION = "v1.2.9"
+CURRENT_VERSION = "v1.3.0"
 
 def check_for_updates():
     """

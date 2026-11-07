@@ -245,10 +245,11 @@ class ConnectorWindow(QWidget):
         app_title = self.nickname if self.nickname else "Hotspot"
         self.setWindowTitle(app_title)
         self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
-        self.showMaximized()
+        self.setStyleSheet("background-color: #09090b;")
 
         self._build_ui(app_title)
         self._bind_signals()
+        self.showMaximized()
         self._show_welcome_popup(app_title)
 
         if self.is_blocked:
@@ -627,9 +628,10 @@ class ConnectorWindow(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if self.welcome_popup.isVisible():
+        if hasattr(self, "welcome_popup") and self.welcome_popup and self.welcome_popup.isVisible():
             self.welcome_popup.move((self.width() - self.welcome_popup.width()) // 2, 45)
-        self.freeze_banner.move((self.width() - self.freeze_banner.width()) // 2, self.height() - 60)
+        if hasattr(self, "freeze_banner") and self.freeze_banner:
+            self.freeze_banner.move((self.width() - self.freeze_banner.width()) // 2, self.height() - 60)
 
     def closeEvent(self, event):
         self.audio_player.stop()
