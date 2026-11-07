@@ -7,38 +7,32 @@ import logging
 logger = logging.getLogger("HotspotUpdater")
 
 REPO = "Kiesh628/hotspot"
-CURRENT_VERSION = "v1.2.2"
+CURRENT_VERSION = "v1.2.3"
 
 def check_for_updates():
     """
     Checks GitHub Releases for updates on application launch.
+    Uses the direct GitHub release web redirect (bypasses GitHub REST API rate limits).
     If a newer release exists and the app is running as a compiled .exe,
     downloads the binary and performs an in-place restart.
     """
     try:
-        url = f"https://api.github.com/repos/{REPO}/releases/latest"
-        resp = requests.get(url, timeout=3)
+        # Direct release redirect URL — never rate-limited by GitHub
+        url = f"https://github.com/{REPO}/releases/latest"
+        resp = requests.get(url, allow_redirects=True, timeout=5)
         if resp.status_code != 200:
             return
 
-        data = resp.json()
-        latest_tag = data.get("tag_name", "").strip()
+        # URL redirects to https://github.com/Kiesh628/hotspot/releases/tag/vX.Y.Z
+        latest_tag = resp.url.rstrip("/").split("/")[-1].strip()
 
         # If tag is newer than CURRENT_VERSION
         if latest_tag and latest_tag != CURRENT_VERSION:
             logger.info(f"New update found: {latest_tag} (Current: {CURRENT_VERSION})")
             
-            # Find Hotspot.exe asset
-            download_url = None
-            for asset in data.get("assets", []):
-                if asset.get("name") == "Hotspot.exe":
-                    download_url = asset.get("browser_download_url")
-                    break
-
-            if not download_url:
-                return
-
+            download_url = f"https://github.com/{REPO}/releases/latest/download/Hotspot.exe"
             current_exe = sys.executable
+
             # Only perform in-place replacement if running as compiled executable
             if not getattr(sys, "frozen", False) or not current_exe.lower().endswith(".exe"):
                 logger.info(f"Running from source: update {latest_tag} available at {download_url}")
@@ -46,15 +40,15 @@ def check_for_updates():
 
             new_exe = os.path.join(os.path.dirname(current_exe), "Hotspot_new.exe")
             
-            # Download new executable
+            # Download new executable directly
             logger.info("Downloading latest update...")
-            r = requests.get(download_url, stream=True, timeout=30)
+            r = requests.get(download_url, stream=True, allow_redirects=True, timeout=60)
             if r.status_code == 200:
                 with open(new_exe, "wb") as f:
                     for chunk in r.iter_content(chunk_size=65536):
                         f.write(chunk)
 
-                # Write a temporary handoff script to swap files and restart
+                # Write a detached batch script to swap files once this process exits
                 batch_script = os.path.join(os.path.dirname(current_exe), "hotspot_update.bat")
                 with open(batch_script, "w") as f:
                     f.write(f"""@echo off
@@ -69,8 +63,9 @@ start "" "{current_exe}"
 del "%~f0"
 exit
 """)
-                # Launch updater batch script detached and exit current process
-                subprocess.Popen(["cmd.exe", "/c", batch_script], close_fds=True)
+                # DETACHED_PROCESS = 0x00000008, CREATE_NEW_PROCESS_GROUP = 0x00000200
+                creation_flags = 0x00000008 | 0x00000200
+                subprocess.Popen(["cmd.exe", "/c", batch_script], close_fds=True, creationflags=creation_flags)
                 sys.exit(0)
 
     except Exception as e:
