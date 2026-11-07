@@ -7,10 +7,9 @@ logger = logging.getLogger("GeminiClient")
 PREFERRED_MODELS = [
     "gemini-3.1-flash-lite",
     "gemini-3.5-flash-lite",
-    "gemini-flash-latest",
-    "gemini-3.8-flash",
-    "gemini-2.5-flash-lite",
-    "gemini-2.0-flash"
+    "gemini-flash-lite-latest",
+    "gemini-3.5-flash",
+    "gemini-3.6-flash"
 ]
 
 class GeminiClient:
@@ -80,7 +79,7 @@ class GeminiClient:
     def ask_screen(self, prompt: str, jpeg_bytes: bytes) -> str:
         """
         Sends the screen image and optional user question to Gemini.
-        If prompt is empty, sends the image alone.
+        If prompt is empty, sends a default prompt to analyze the boxed region.
         """
         if not self.api_key:
             return "Error: No Gemini API key provided."
@@ -88,23 +87,28 @@ class GeminiClient:
         b64_image = base64.b64encode(jpeg_bytes).decode("utf-8")
         models = PREFERRED_MODELS
 
-        parts = []
         clean_prompt = prompt.strip() if prompt else ""
-        if clean_prompt:
-            parts.append({
+        prompt_instruction = (
+            clean_prompt
+            if clean_prompt
+            else "Describe what you see in this selected screen region and provide concise, helpful context or solutions."
+        )
+
+        parts = [
+            {
                 "text": (
                     "You are an AI pairing and remote assistant viewing the user's friend's screen. "
                     "Provide clear, concise, actionable advice or answers based on what is visible. "
-                    f"\n\nQuestion from user: {clean_prompt}"
+                    f"\n\nUser request: {prompt_instruction}"
                 )
-            })
-
-        parts.append({
-            "inline_data": {
-                "mime_type": "image/jpeg",
-                "data": b64_image
+            },
+            {
+                "inline_data": {
+                    "mime_type": "image/jpeg",
+                    "data": b64_image
+                }
             }
-        })
+        ]
 
         payload = {
             "contents": [
@@ -128,15 +132,16 @@ class GeminiClient:
                         "Content-Type": "application/json"
                     },
                     json=payload,
-                    timeout=25
+                    timeout=10
                 )
                 if resp.status_code == 200:
                     data = resp.json()
                     candidates = data.get("candidates", [])
                     if candidates and "content" in candidates[0]:
                         item_parts = candidates[0]["content"].get("parts", [])
-                        if item_parts and "text" in item_parts[0]:
-                            return item_parts[0]["text"].strip()
+                        text_parts = [p.get("text", "") for p in item_parts if "text" in p]
+                        if text_parts:
+                            return "\n".join(text_parts).strip()
                     return "No response text received from Gemini."
                 elif resp.status_code in (404, 503, 429):
                     logger.warning(f"Model {model} returned {resp.status_code}, attempting fallback model...")

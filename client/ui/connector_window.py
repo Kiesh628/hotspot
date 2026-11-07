@@ -1,7 +1,9 @@
+import html
+import re
 import threading
 from PySide6.QtCore import Qt, QTimer, QEvent, QRect, QPoint, QByteArray, QBuffer, QIODevice, Signal
 from PySide6.QtGui import (
-    QPainter, QPixmap, QImage, QColor, QFont, QPen, QBrush, QKeyEvent, QMouseEvent, QWheelEvent
+    QPainter, QPixmap, QImage, QColor, QFont, QPen, QBrush, QKeyEvent, QMouseEvent, QWheelEvent, QTextCursor
 )
 from PySide6.QtWidgets import (
     QWidget, QLabel, QPushButton, QHBoxLayout, QVBoxLayout,
@@ -11,6 +13,65 @@ from PySide6.QtWidgets import (
 from ui.icons import create_mic_icon, create_cam_icon, create_mode_icon, create_sidebar_icon
 from core.gemini import GeminiClient
 from core.media_streamer import AudioPlayer
+
+def format_markdown(text: str) -> str:
+    """
+    Renders common Markdown formatting from Gemini into clean HTML for QTextEdit.
+    Handles code blocks, inline code, bold, italics, headers, lists, and spacing.
+    """
+    if not text:
+        return ""
+
+    # 1. Protect fenced code blocks (```lang\n...\n```)
+    code_blocks = []
+    def repl_code(m):
+        code_blocks.append(html.escape(m.group(2).strip()))
+        return f"___CODE_BLOCK_{len(code_blocks)-1}___"
+    s = re.sub(r"```([a-zA-Z0-9_-]*)\n?(.*?)```", repl_code, text, flags=re.DOTALL)
+
+    # 2. Protect inline code (`code`)
+    inline_codes = []
+    def repl_inline(m):
+        inline_codes.append(html.escape(m.group(1)))
+        return f"___INLINE_CODE_{len(inline_codes)-1}___"
+    s = re.sub(r"`([^`]+)`", repl_inline, s)
+
+    # 3. HTML escape remaining text
+    s = html.escape(s)
+
+    # 4. Bold and italics
+    s = re.sub(r"\*\*(.+?)\*\*", r"<b style='color:#ffffff;'>\1</b>", s)
+    s = re.sub(r"\*(.+?)\*", r"<i>\1</i>", s)
+
+    # 5. Headers (###, ##, #)
+    s = re.sub(r"^###\s+(.+)$", r"<h4 style='margin:6px 0 2px 0; color:#38bdf8; font-size:13px;'>\1</h4>", s, flags=re.MULTILINE)
+    s = re.sub(r"^##\s+(.+)$", r"<h3 style='margin:8px 0 3px 0; color:#38bdf8; font-size:14px;'>\1</h3>", s, flags=re.MULTILINE)
+    s = re.sub(r"^#\s+(.+)$", r"<h2 style='margin:10px 0 4px 0; color:#38bdf8; font-size:15px;'>\1</h2>", s, flags=re.MULTILINE)
+
+    # 6. Bullet lists & numbered lists
+    s = re.sub(r"^\s*[-*]\s+(.+)$", r"<div style='margin-left:12px; color:#e4e4e7;'>&bull; \1</div>", s, flags=re.MULTILINE)
+    s = re.sub(r"^\s*(\d+)\.\s+(.+)$", r"<div style='margin-left:12px; color:#e4e4e7;'>\1. \2</div>", s, flags=re.MULTILINE)
+
+    # 7. Convert remaining newlines
+    s = s.replace("\r\n", "\n")
+    s = re.sub(r"\n{2,}", "<br><br>", s)
+    s = s.replace("\n", "<br>")
+
+    # 8. Restore inline code
+    for i, code in enumerate(inline_codes):
+        s = s.replace(
+            f"___INLINE_CODE_{i}___",
+            f"<code style='background:#27272a; color:#38bdf8; padding:1px 5px; border-radius:3px; font-family:Consolas,monospace;'>{code}</code>"
+        )
+
+    # 9. Restore code blocks
+    for i, code in enumerate(code_blocks):
+        s = s.replace(
+            f"___CODE_BLOCK_{i}___",
+            f"<div style='background:#111113; border:1px solid #27272a; border-radius:6px; padding:8px 10px; margin:6px 0; font-family:Consolas,monospace; font-size:11px; color:#38bdf8; white-space:pre-wrap;'>{code}</div>"
+        )
+
+    return s
 
 class RemoteCanvas(QWidget):
     region_selected = Signal(bytes) # Emits cropped JPEG bytes when a region is boxed
@@ -135,17 +196,21 @@ class RemoteCanvas(QWidget):
                     scale_x = orig_w / render_rect.width()
                     scale_y = orig_h / render_rect.height()
 
-                    crop_x = int((intersect.x() - render_rect.x()) * scale_x)
-                    crop_y = int((intersect.y() - render_rect.y()) * scale_y)
-                    crop_w = int(intersect.width() * scale_x)
-                    crop_h = int(intersect.height() * scale_y)
+                    crop_x = max(0, min(int((intersect.x() - render_rect.x()) * scale_x), orig_w - 1))
+                    crop_y = max(0, min(int((intersect.y() - render_rect.y()) * scale_y), orig_h - 1))
+                    crop_w = max(1, min(int(intersect.width() * scale_x), orig_w - crop_x))
+                    crop_h = max(1, min(int(intersect.height() * scale_y), orig_h - crop_y))
 
                     cropped = self.current_pixmap.copy(crop_x, crop_y, crop_w, crop_h)
-                    ba = QByteArray()
-                    buf = QBuffer(ba)
-                    buf.open(QIODevice.OpenModeFlag.WriteOnly)
-                    cropped.save(buf, "JPG")
-                    self.region_selected.emit(ba.data())
+                    if not cropped.isNull():
+                        ba = QByteArray()
+                        buf = QBuffer(ba)
+                        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+                        cropped.save(buf, "JPG", 85)
+                        buf.close()
+                        jpeg_data = bytes(ba.data())
+                        if jpeg_data:
+                            self.region_selected.emit(jpeg_data)
 
             self.selection_start = None
             self.selection_current = None
@@ -595,22 +660,25 @@ class ConnectorWindow(QWidget):
 
     def _on_region_selected(self, cropped_jpeg_bytes: bytes):
         if not self.gemini:
-            self.chat_history.append("<b style='color:#ef4444;'>AI:</b> No Gemini API key verified.")
+            self.chat_history.append("<div style='margin-top:4px;'><b style='color:#ef4444;'>AI:</b> No Gemini API key verified.</div>")
             return
 
         user_text = self.prompt_input.text().strip()
         if user_text:
             prompt = user_text
             self.prompt_input.clear()
-            self.chat_history.append(f"<b style='color:#60a5fa;'>You (Boxed Region):</b> {prompt}")
+            self.chat_history.append(f"<div style='margin-top:6px;'><b style='color:#60a5fa;'>You (Boxed Region):</b> {html.escape(prompt)}</div>")
         else:
             prompt = ""
-            self.chat_history.append("<b style='color:#60a5fa;'>You:</b> <i>[Sent Boxed Region]</i>")
+            self.chat_history.append("<div style='margin-top:6px;'><b style='color:#60a5fa;'>You:</b> <i>[Sent Boxed Region]</i></div>")
 
         self.chat_history.append("<i style='color:#a1a1aa;'>Thinking...</i>")
 
         def worker():
-            answer = self.gemini.ask_screen(prompt, cropped_jpeg_bytes)
+            try:
+                answer = self.gemini.ask_screen(prompt, cropped_jpeg_bytes)
+            except Exception as e:
+                answer = f"Error: Request failed ({e})"
             QTimer.singleShot(0, lambda: self._append_ai_response(answer))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -620,27 +688,45 @@ class ConnectorWindow(QWidget):
         if not prompt:
             return
         if not self.gemini:
-            self.chat_history.append("<b style='color:#ef4444;'>AI:</b> No Gemini API key verified.")
+            self.chat_history.append("<div style='margin-top:4px;'><b style='color:#ef4444;'>AI:</b> No Gemini API key verified.</div>")
             return
 
         jpeg_bytes = self.canvas.latest_jpeg_bytes
         if not jpeg_bytes:
-            self.chat_history.append("<b style='color:#ef4444;'>AI:</b> No screen frame captured yet.")
+            self.chat_history.append("<div style='margin-top:4px;'><b style='color:#ef4444;'>AI:</b> No screen frame captured yet.</div>")
             return
 
-        self.chat_history.append(f"<b style='color:#60a5fa;'>You:</b> {prompt}")
+        self.chat_history.append(f"<div style='margin-top:6px;'><b style='color:#60a5fa;'>You:</b> {html.escape(prompt)}</div>")
         self.prompt_input.clear()
         self.chat_history.append("<i style='color:#a1a1aa;'>Thinking...</i>")
 
         def worker():
-            answer = self.gemini.ask_screen(prompt, jpeg_bytes)
+            try:
+                answer = self.gemini.ask_screen(prompt, jpeg_bytes)
+            except Exception as e:
+                answer = f"Error: Request failed ({e})"
             QTimer.singleShot(0, lambda: self._append_ai_response(answer))
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _append_ai_response(self, text: str):
-        formatted = text.replace("\n", "<br>").replace("`", "")
-        self.chat_history.append(f"<b style='color:#34d399;'>AI:</b> {formatted}<br>")
+        # Erase trailing "Thinking..." block if present
+        cursor = self.chat_history.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        cursor.select(QTextCursor.SelectionType.BlockUnderCursor)
+        if "Thinking..." in cursor.selectedText():
+            cursor.removeSelectedText()
+
+        if text.startswith("Error:") or text.startswith("Failed") or text.startswith("Gemini Error"):
+            html_content = f"<div style='margin-top:4px; margin-bottom:6px;'><b style='color:#ef4444;'>AI Error:</b> <span style='color:#f87171;'>{html.escape(text)}</span></div>"
+        else:
+            formatted = format_markdown(text)
+            html_content = f"<div style='margin-top:4px; margin-bottom:8px;'><b style='color:#34d399;'>AI:</b><div style='margin-top:3px; line-height:1.4;'>{formatted}</div></div>"
+
+        self.chat_history.append(html_content)
+        sb = self.chat_history.verticalScrollBar()
+        if sb:
+            sb.setValue(sb.maximum())
 
     def _bind_signals(self):
         self.client.signals.screen_frame_received.connect(self.canvas.update_frame)
