@@ -6,32 +6,43 @@ logger = logging.getLogger("GeminiClient")
 
 class GeminiClient:
     def __init__(self, api_key: str):
-        self.api_key = api_key.strip() if api_key else ""
+        self.api_key = api_key.strip().strip('"').strip("'") if api_key else ""
 
     @staticmethod
     def verify_key(api_key: str) -> tuple[bool, str]:
         """
-        Validates the provided Gemini API key by calling the models endpoint.
+        Validates the provided Gemini API key by probing the Gemini endpoint.
         Returns (is_valid, message).
         """
-        key = api_key.strip()
+        key = api_key.strip().strip('"').strip("'") if api_key else ""
         if not key:
             return False, "API key is empty."
+
         try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models?key={key}"
-            resp = requests.get(url, timeout=6)
+            # Fast single-model probe (takes ~0.3s)
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash?key={key}"
+            resp = requests.get(url, timeout=5)
             if resp.status_code == 200:
                 return True, "API key verified successfully!"
-            elif resp.status_code == 400 or resp.status_code == 403:
+            elif resp.status_code in (400, 403):
                 return False, "Invalid API key or insufficient permissions."
+            elif resp.status_code == 404:
+                # Fallback to models list
+                url2 = f"https://generativelanguage.googleapis.com/v1beta/models?key={key}"
+                resp2 = requests.get(url2, timeout=5)
+                if resp2.status_code == 200:
+                    return True, "API key verified successfully!"
+                return False, f"Verification failed with status {resp2.status_code}"
             else:
                 return False, f"Verification returned status {resp.status_code}"
+        except requests.exceptions.Timeout:
+            return False, "Connection timed out. Check your internet connection."
         except Exception as e:
-            return False, f"Network error during verification: {e}"
+            return False, f"Network error: {e}"
 
     def ask_screen(self, prompt: str, jpeg_bytes: bytes) -> str:
         """
-        Sends the current screen image and the optional user question to Gemini.
+        Sends the screen image and optional user question to Gemini.
         If prompt is empty, sends the image alone.
         """
         if not self.api_key:
@@ -78,12 +89,12 @@ class GeminiClient:
                     data = resp.json()
                     candidates = data.get("candidates", [])
                     if candidates and "content" in candidates[0]:
-                        parts = candidates[0]["content"].get("parts", [])
-                        if parts and "text" in parts[0]:
-                            return parts[0]["text"].strip()
+                        item_parts = candidates[0]["content"].get("parts", [])
+                        if item_parts and "text" in item_parts[0]:
+                            return item_parts[0]["text"].strip()
                     return "No response text received from Gemini."
                 elif resp.status_code == 404:
-                    continue # Try next model fallback
+                    continue
                 else:
                     return f"Gemini Error ({resp.status_code}): {resp.text}"
             except Exception as e:

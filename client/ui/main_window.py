@@ -7,6 +7,7 @@ import cv2
 
 from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtGui import QIcon, QFont, QPixmap, QPainter, QColor
+from PySide6.QtMultimedia import QMediaDevices
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QLabel,
     QLineEdit, QPushButton, QComboBox, QFrame, QSystemTrayIcon, QMenu, QApplication
@@ -15,7 +16,7 @@ from PySide6.QtWidgets import (
 from config import load_config, save_config, generate_random_code, validate_keybind_uniqueness
 from ui.keybind_widget import MinecraftKeybindButton
 from ui.connector_window import ConnectorWindow
-from ui.device_preview import AudioMonitor, CameraPreviewThread, VolumeBar, CameraThumbnail
+from ui.device_preview import AudioMonitor, CameraPreviewThread, VolumeMeter, CameraThumbnail, open_camera_capture
 from core.network import ConnecteeClient, ConnectorClient
 from core.capturer import ScreenCapturer
 from core.media_streamer import WebcamCapturer, AudioCapturer
@@ -56,7 +57,7 @@ class MainWindow(QMainWindow):
         self.connector_window: ConnectorWindow = None
         self.connector_client: ConnectorClient = None
 
-        # Device previews
+        # Device previews (landing UI only)
         self.audio_monitor = AudioMonitor()
         self.cam_preview_thread = None
 
@@ -88,10 +89,8 @@ class MainWindow(QMainWindow):
         self.connectee_client.signals.connector_joined.connect(self._on_connector_joined)
         self.connectee_client.signals.code_reset.connect(self._on_host_code_reset)
 
-        # Start Connectee Services
+        # Start Connectee Relay Connection & Screen Streamer
         self.connectee_client.start()
-
-        # Screen capturer
         self.capturer = ScreenCapturer(
             frame_queue=self.connectee_client.frame_queue,
             loop=self.connectee_client.loop,
@@ -99,7 +98,7 @@ class MainWindow(QMainWindow):
         )
         self.capturer.start()
 
-        # Scan and initialize devices
+        # Initialize Hardware Devices (Webcam & Mic)
         self._init_hardware_devices()
 
     def _setup_style(self):
@@ -128,6 +127,13 @@ class MainWindow(QMainWindow):
             QComboBox::drop-down {
                 border: none;
                 width: 20px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #18181b;
+                color: #fafafa;
+                selection-background-color: #2563eb;
+                selection-color: #ffffff;
+                border: 1px solid #27272a;
             }
             QPushButton.primary-btn {
                 background-color: #2563eb;
@@ -203,7 +209,7 @@ class MainWindow(QMainWindow):
         self.lbl_key_status = QLabel("")
         self.lbl_key_status.setStyleSheet("font-size: 11px;")
         if self.config.get("gemini_api_key"):
-            self.lbl_key_status.setText("Saved key present (Click verify to test)")
+            self.lbl_key_status.setText("Saved key present (Click Verify to test)")
             self.lbl_key_status.setStyleSheet("color: #a1a1aa; font-size: 11px;")
         left_layout.addWidget(self.lbl_key_status)
 
@@ -286,7 +292,7 @@ class MainWindow(QMainWindow):
         code_box.addWidget(btn_reset_code)
         right_layout.addLayout(code_box)
 
-        # Keybind Controls (Minecraft-style buttons)
+        # Keybind Controls
         keybinds_header = QLabel("EMERGENCY KEYBINDS")
         keybinds_header.setStyleSheet("font-weight: 600; font-size: 11px; color: #71717a; letter-spacing: 1px;")
         right_layout.addWidget(keybinds_header)
@@ -311,7 +317,7 @@ class MainWindow(QMainWindow):
         kb2_layout.addWidget(self.btn_kb_kick)
         right_layout.addLayout(kb2_layout)
 
-        # Global Duplicate Keybind Error Label
+        # Duplicate Keybind Error Label
         self.lbl_keybind_error = QLabel("")
         self.lbl_keybind_error.setStyleSheet("color: #ef4444; font-size: 11px; font-weight: bold;")
         right_layout.addWidget(self.lbl_keybind_error)
@@ -342,12 +348,12 @@ class MainWindow(QMainWindow):
         self.combo_mic.currentIndexChanged.connect(self._on_mic_selected)
         mic_section.addWidget(self.combo_mic)
 
-        self.volume_bar = VolumeBar()
+        self.volume_bar = VolumeMeter()
         mic_section.addWidget(self.volume_bar)
         right_layout.addLayout(mic_section)
 
         # Connect volume monitor signal
-        self.audio_monitor.volume_changed.connect(self.volume_bar.setValue)
+        self.audio_monitor.volume_changed.connect(self.volume_bar.set_level)
 
         right_layout.addStretch()
         main_layout.addWidget(right_box)
@@ -358,55 +364,90 @@ class MainWindow(QMainWindow):
             devices = sd.query_devices()
             input_devices = []
             seen_names = set()
+            default_in = sd.default.device[0] if sd.default.device[0] >= 0 else None
+            default_combo_idx = 0
+
             for i, d in enumerate(devices):
                 name = d.get("name", "").strip()
                 if d.get("max_input_channels", 0) > 0 and name not in seen_names:
                     seen_names.add(name)
+                    if i == default_in:
+                        default_combo_idx = len(input_devices)
                     input_devices.append((i, name))
 
+            self.combo_mic.blockSignals(True)
             self.combo_mic.clear()
             if input_devices:
                 for idx, name in input_devices:
                     self.combo_mic.addItem(name, idx)
-                self.audio_monitor.start(input_devices[0][0])
+                self.combo_mic.setCurrentIndex(default_combo_idx)
+                selected_mic_idx = self.combo_mic.currentData()
+                self.audio_monitor.start(selected_mic_idx)
+                self.connectee_client.mic_available = True
             else:
                 self.combo_mic.addItem("No microphone detected", None)
                 self.combo_mic.setEnabled(False)
+                self.connectee_client.mic_available = False
+            self.combo_mic.blockSignals(False)
         except Exception:
             self.combo_mic.addItem("No microphone detected", None)
             self.combo_mic.setEnabled(False)
+            self.connectee_client.mic_available = False
 
-        # 2. Cameras (Scan indices in background)
-        def scan_cams():
+        # 2. Cameras (Using QMediaDevices for instant hardware detection)
+        try:
             detected_cams = []
-            for i in range(4):
-                try:
-                    cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
-                    if not cap.isOpened():
-                        cap = cv2.VideoCapture(i)
-                    if cap.isOpened():
-                        detected_cams.append(i)
+            media_cams = QMediaDevices.videoInputs()
+            if media_cams:
+                for i, c in enumerate(media_cams):
+                    desc = c.description().strip()
+                    detected_cams.append((i, desc))
+            else:
+                # Fallback: probe indices 0..3
+                for i in range(4):
+                    cap = open_camera_capture(i)
+                    if cap:
+                        detected_cams.append((i, f"Camera {i}"))
                         cap.release()
-                except Exception:
-                    pass
 
-            QTimer.singleShot(0, lambda: self._on_cameras_scanned(detected_cams))
+            self.combo_cam.blockSignals(True)
+            self.combo_cam.clear()
+            working_cam_idx = None
 
-        threading.Thread(target=scan_cams, daemon=True).start()
+            if detected_cams:
+                for idx, name in detected_cams:
+                    self.combo_cam.addItem(f"{name} ({idx})", idx)
+                    if working_cam_idx is None:
+                        # Test if this index can be opened
+                        test_cap = open_camera_capture(idx)
+                        if test_cap:
+                            test_cap.release()
+                            working_cam_idx = idx
 
-    def _on_cameras_scanned(self, detected_indices):
-        self.combo_cam.clear()
-        if detected_indices:
-            for i in detected_indices:
-                self.combo_cam.addItem(f"Camera {i}", i)
-            self._start_camera_preview(detected_indices[0])
-        else:
+                # Select first working camera
+                if working_cam_idx is not None:
+                    target_pos = self.combo_cam.findData(working_cam_idx)
+                    if target_pos >= 0:
+                        self.combo_cam.setCurrentIndex(target_pos)
+                    self._start_camera_preview(working_cam_idx)
+                    self.connectee_client.camera_available = True
+                else:
+                    self._start_camera_preview(detected_cams[0][0])
+                    self.connectee_client.camera_available = True
+            else:
+                self.combo_cam.addItem("No camera detected", None)
+                self.combo_cam.setEnabled(False)
+                self.connectee_client.camera_available = False
+            self.combo_cam.blockSignals(False)
+        except Exception:
             self.combo_cam.addItem("No camera detected", None)
             self.combo_cam.setEnabled(False)
+            self.connectee_client.camera_available = False
 
     def _start_camera_preview(self, cam_idx):
         if self.cam_preview_thread:
             self.cam_preview_thread.stop()
+            self.cam_preview_thread.join(timeout=1.0)
             self.cam_preview_thread = None
 
         if cam_idx is not None:
@@ -420,50 +461,28 @@ class MainWindow(QMainWindow):
         cam_idx = self.combo_cam.currentData()
         if cam_idx is not None:
             self._start_camera_preview(cam_idx)
-            # Recreate connectee webcam capturer with selected index
-            if self.webcam_capturer:
-                self.webcam_capturer.stop()
-            self.webcam_capturer = WebcamCapturer(
-                frame_queue=self.connectee_client.frame_queue,
-                loop=self.connectee_client.loop,
-                target_fps=15,
-                camera_index=cam_idx
-            )
-            self.webcam_capturer.start()
-            self.connectee_client.webcam_capturer = self.webcam_capturer
-            self.connectee_client.camera_available = self.webcam_capturer.is_available
 
     def _on_mic_selected(self, index):
         mic_idx = self.combo_mic.currentData()
         if mic_idx is not None:
             self.audio_monitor.start(mic_idx)
-            # Recreate connectee audio capturer with selected index
-            if self.audio_capturer:
-                self.audio_capturer.stop()
-            self.audio_capturer = AudioCapturer(
-                audio_queue=self.connectee_client.frame_queue,
-                loop=self.connectee_client.loop,
-                samplerate=16000,
-                mic_device_index=mic_idx
-            )
-            self.audio_capturer.start()
-            self.connectee_client.audio_capturer = self.audio_capturer
-            self.connectee_client.mic_available = self.audio_capturer.is_available
 
     def _on_verify_key_clicked(self):
-        key = self.input_api_key.text().strip()
-        if not key:
+        raw_key = self.input_api_key.text()
+        clean_key = raw_key.strip().strip('"').strip("'").strip()
+        if not clean_key:
             self.lbl_key_status.setText("Please enter an API key.")
             self.lbl_key_status.setStyleSheet("color: #ef4444; font-size: 11px;")
             return
 
+        self.btn_verify_key.setEnabled(False)
         self.lbl_key_status.setText("Verifying key with Google...")
         self.lbl_key_status.setStyleSheet("color: #38bdf8; font-size: 11px;")
 
         def worker():
-            is_valid, msg = GeminiClient.verify_key(key)
+            is_valid, msg = GeminiClient.verify_key(clean_key)
             if is_valid:
-                self.config["gemini_api_key"] = key
+                self.config["gemini_api_key"] = clean_key
                 save_config(self.config)
                 QTimer.singleShot(0, lambda: self._on_key_verified(True, "✓ Verified & Saved!"))
             else:
@@ -472,6 +491,7 @@ class MainWindow(QMainWindow):
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_key_verified(self, is_valid: bool, text: str):
+        self.btn_verify_key.setEnabled(True)
         self.lbl_key_status.setText(text)
         self.lbl_key_status.setStyleSheet(f"color: {'#22c55e' if is_valid else '#ef4444'}; font-size: 11px; font-weight: bold;")
 
@@ -565,7 +585,7 @@ class MainWindow(QMainWindow):
 
     def _on_connector_joined_success(self, code: str, nickname: str, is_blocked: bool):
         self.lbl_connector_status.setText("")
-        # Open fullscreen connector window with host nickname
+        # Open fullscreen connector window
         self.connector_window = ConnectorWindow(
             connector_client=self.connector_client,
             nickname=nickname,
@@ -584,11 +604,46 @@ class MainWindow(QMainWindow):
         save_config(self.config)
 
     def _on_connector_joined(self, count: int):
-        # Stop landing preview when connection is established
+        # 1. Stop landing preview and release camera device cleanly
         if self.cam_preview_thread:
             self.cam_preview_thread.stop()
+            self.cam_preview_thread.join(timeout=1.0)
             self.cam_preview_thread = None
+
+        # 2. Stop landing audio monitor
         self.audio_monitor.stop()
+
+        # 3. Start streaming webcam capturer with selected camera
+        cam_idx = self.combo_cam.currentData()
+        if cam_idx is not None:
+            self.webcam_capturer = WebcamCapturer(
+                frame_queue=self.connectee_client.frame_queue,
+                loop=self.connectee_client.loop,
+                target_fps=15,
+                camera_index=cam_idx
+            )
+            self.webcam_capturer.start()
+            self.connectee_client.webcam_capturer = self.webcam_capturer
+            self.connectee_client.camera_available = self.webcam_capturer.is_available
+        else:
+            self.connectee_client.camera_available = False
+
+        # 4. Start streaming audio capturer with selected mic
+        mic_idx = self.combo_mic.currentData()
+        if mic_idx is not None:
+            self.audio_capturer = AudioCapturer(
+                audio_queue=self.connectee_client.frame_queue,
+                loop=self.connectee_client.loop,
+                samplerate=16000,
+                mic_device_index=mic_idx
+            )
+            self.audio_capturer.start()
+            self.connectee_client.audio_capturer = self.audio_capturer
+            self.connectee_client.mic_available = self.audio_capturer.is_available
+        else:
+            self.connectee_client.mic_available = False
+
+        # 5. Hide main window to system tray
         self.hide()
 
     def _on_host_code_reset(self, new_code: str):
