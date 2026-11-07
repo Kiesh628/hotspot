@@ -5,7 +5,7 @@ import threading
 import sounddevice as sd
 import cv2
 
-from PySide6.QtCore import Qt, QSize, QTimer
+from PySide6.QtCore import Qt, QSize, QTimer, QThread, Signal
 from PySide6.QtGui import QIcon, QFont, QPixmap, QPainter, QColor
 from PySide6.QtMultimedia import QMediaDevices
 from PySide6.QtWidgets import (
@@ -24,6 +24,21 @@ from core.media_streamer import WebcamCapturer, AudioCapturer
 from core.input_simulator import InputSimulator
 from core.hotkey_listener import HotkeyManager
 from core.gemini import GeminiClient
+
+class KeyVerifierThread(QThread):
+    result_ready = Signal(bool, str, str)  # is_valid, message, clean_key
+
+    def __init__(self, key: str, parent=None):
+        super().__init__(parent)
+        self.key = key
+
+    def run(self):
+        try:
+            is_valid, msg = GeminiClient.verify_key(self.key)
+            self.result_ready.emit(is_valid, msg, self.key)
+        except Exception as e:
+            self.result_ready.emit(False, f"Verification failed: {e}", self.key)
+
 
 def create_tray_icon_pixmap() -> QPixmap:
     pixmap = QPixmap(32, 32)
@@ -499,21 +514,20 @@ class MainWindow(QMainWindow):
         self.lbl_key_status.setText("Verifying key with Google...")
         self.lbl_key_status.setStyleSheet("color: #38bdf8; font-size: 11px;")
 
-        def worker():
-            is_valid, msg = GeminiClient.verify_key(clean_key)
-            if is_valid:
-                self.config["gemini_api_key"] = clean_key
-                save_config(self.config)
-                QTimer.singleShot(0, lambda: self._on_key_verified(True, "✓ Verified & Saved!"))
-            else:
-                QTimer.singleShot(0, lambda: self._on_key_verified(False, f"✕ {msg}"))
+        self.verifier_thread = KeyVerifierThread(clean_key, self)
+        self.verifier_thread.result_ready.connect(self._on_key_verified)
+        self.verifier_thread.start()
 
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _on_key_verified(self, is_valid: bool, text: str):
+    def _on_key_verified(self, is_valid: bool, text: str, clean_key: str):
         self.btn_verify_key.setEnabled(True)
-        self.lbl_key_status.setText(text)
-        self.lbl_key_status.setStyleSheet(f"color: {'#22c55e' if is_valid else '#ef4444'}; font-size: 11px; font-weight: bold;")
+        if is_valid:
+            self.config["gemini_api_key"] = clean_key
+            save_config(self.config)
+            self.lbl_key_status.setText("✓ Verified & Saved!")
+            self.lbl_key_status.setStyleSheet("color: #22c55e; font-size: 11px; font-weight: bold;")
+        else:
+            self.lbl_key_status.setText(f"✕ {text}")
+            self.lbl_key_status.setStyleSheet("color: #ef4444; font-size: 11px; font-weight: bold;")
 
     def _validate_all_keys(self) -> bool:
         k_freeze = self.config.get("keybind_freeze")

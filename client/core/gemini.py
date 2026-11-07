@@ -26,38 +26,39 @@ class GeminiClient:
             return False, "API key is empty."
 
         for model in PREFERRED_MODELS:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
             try:
                 resp = requests.post(
                     url,
+                    headers={
+                        "x-goog-api-key": key,
+                        "Content-Type": "application/json"
+                    },
                     json={"contents": [{"parts": [{"text": "ping"}]}]},
                     timeout=5
                 )
+                
+                err_msg = ""
+                try:
+                    err_msg = resp.json().get("error", {}).get("message", "").strip()
+                except Exception:
+                    pass
+
                 if resp.status_code == 200:
                     return True, "API key verified successfully!"
                 elif resp.status_code == 402:
-                    return False, "Prepayment credits depleted on this project. Create a free API key at aistudio.google.com in a new project."
-                elif resp.status_code == 400:
-                    err_msg = ""
-                    try:
-                        err_msg = resp.json().get("error", {}).get("message", "")
-                    except Exception:
-                        pass
+                    return False, f"Prepayment credits depleted: {err_msg or 'Please check project billing or create a free key in a new project'}"
+                elif resp.status_code in (400, 401):
                     return False, f"Invalid key: {err_msg or 'API key not valid'}"
                 elif resp.status_code == 403:
-                    err_msg = ""
-                    try:
-                        err_msg = resp.json().get("error", {}).get("message", "")
-                    except Exception:
-                        pass
-                    return False, f"Permission error: {err_msg or 'Access forbidden'}"
+                    return False, f"Permission error: {err_msg or 'Access forbidden or API disabled'}"
                 elif resp.status_code == 429:
                     return False, "Rate limit reached. Please retry in a moment."
                 elif resp.status_code == 404:
                     # Model not found on this endpoint version, try next model
                     continue
                 else:
-                    return False, f"Verification returned status {resp.status_code}"
+                    return False, f"Google API Error ({resp.status_code}): {err_msg or resp.text[:100]}"
             except requests.exceptions.Timeout:
                 return False, "Connection timed out. Check your internet connection."
             except Exception as e:
@@ -115,9 +116,17 @@ class GeminiClient:
         }
 
         for model in models:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={self.api_key}"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
             try:
-                resp = requests.post(url, json=payload, timeout=25)
+                resp = requests.post(
+                    url,
+                    headers={
+                        "x-goog-api-key": self.api_key,
+                        "Content-Type": "application/json"
+                    },
+                    json=payload,
+                    timeout=25
+                )
                 if resp.status_code == 200:
                     data = resp.json()
                     candidates = data.get("candidates", [])
