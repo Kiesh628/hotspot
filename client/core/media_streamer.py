@@ -9,8 +9,9 @@ import logging
 logger = logging.getLogger("MediaStreamer")
 
 class WebcamCapturer(threading.Thread):
-    def __init__(self, frame_queue: asyncio.Queue, loop: asyncio.AbstractEventLoop, target_fps: int = 15, camera_index: int = 0):
+    def __init__(self, connectee_client=None, frame_queue: asyncio.Queue = None, loop: asyncio.AbstractEventLoop = None, target_fps: int = 15, camera_index: int = 0):
         super().__init__(daemon=True)
+        self.client = connectee_client
         self.frame_queue = frame_queue
         self.loop = loop
         self.target_fps = target_fps
@@ -56,8 +57,11 @@ class WebcamCapturer(threading.Thread):
                     _, buffer = cv2.imencode(".jpg", frame_small, [int(cv2.IMWRITE_JPEG_QUALITY), 55])
                     # 0x02 header for webcam
                     tagged_packet = b"\x02" + buffer.tobytes()
-                    if self.frame_queue.qsize() < 4:
-                        asyncio.run_coroutine_threadsafe(self.frame_queue.put(tagged_packet), self.loop)
+                    if self.client is not None:
+                        self.client.send_packet(tagged_packet, max_queue_size=4)
+                    elif self.frame_queue is not None and self.loop is not None and self.loop.is_running():
+                        if self.frame_queue.qsize() < 4:
+                            asyncio.run_coroutine_threadsafe(self.frame_queue.put(tagged_packet), self.loop)
 
             elapsed = time.time() - start_time
             sleep_time = interval - elapsed
@@ -74,7 +78,8 @@ class WebcamCapturer(threading.Thread):
 
 
 class AudioCapturer:
-    def __init__(self, audio_queue: asyncio.Queue, loop: asyncio.AbstractEventLoop, samplerate: int = 16000, mic_device_index=None):
+    def __init__(self, connectee_client=None, audio_queue: asyncio.Queue = None, loop: asyncio.AbstractEventLoop = None, samplerate: int = 16000, mic_device_index=None):
+        self.client = connectee_client
         self.audio_queue = audio_queue
         self.loop = loop
         self.samplerate = samplerate
@@ -113,8 +118,11 @@ class AudioCapturer:
             # 0x03 header for mic audio
             raw_bytes = indata.tobytes()
             tagged_packet = b"\x03" + raw_bytes
-            if self.audio_queue.qsize() < 10:
-                asyncio.run_coroutine_threadsafe(self.audio_queue.put(tagged_packet), self.loop)
+            if self.client is not None:
+                self.client.send_packet(tagged_packet, max_queue_size=10)
+            elif self.audio_queue is not None and self.loop is not None and self.loop.is_running():
+                if self.audio_queue.qsize() < 10:
+                    asyncio.run_coroutine_threadsafe(self.audio_queue.put(tagged_packet), self.loop)
 
     def set_enabled(self, enabled: bool):
         self.is_enabled = enabled

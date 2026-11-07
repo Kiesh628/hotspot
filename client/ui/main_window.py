@@ -103,13 +103,13 @@ class MainWindow(QMainWindow):
         # Bind Connectee Network Signals
         self.connectee_client.signals.registered.connect(self._on_host_registered)
         self.connectee_client.signals.connector_joined.connect(self._on_connector_joined)
+        self.connectee_client.signals.connector_left.connect(self._on_connector_left)
         self.connectee_client.signals.code_reset.connect(self._on_host_code_reset)
 
         # Start Connectee Relay Connection & Screen Streamer
         self.connectee_client.start()
         self.capturer = ScreenCapturer(
-            frame_queue=self.connectee_client.frame_queue,
-            loop=self.connectee_client.loop,
+            connectee_client=self.connectee_client,
             target_fps=30
         )
         self.capturer.start()
@@ -650,41 +650,62 @@ class MainWindow(QMainWindow):
 
         # 3. Start streaming webcam capturer with selected camera
         cam_idx = self.combo_cam.currentData()
-        if cam_idx is not None:
+        if cam_idx is not None and self.webcam_capturer is None:
             self.webcam_capturer = WebcamCapturer(
-                frame_queue=self.connectee_client.frame_queue,
-                loop=self.connectee_client.loop,
+                connectee_client=self.connectee_client,
                 target_fps=15,
                 camera_index=cam_idx
             )
             self.webcam_capturer.start()
             self.connectee_client.webcam_capturer = self.webcam_capturer
             self.connectee_client.camera_available = self.webcam_capturer.is_available
-        else:
+        elif self.webcam_capturer is None:
             self.connectee_client.camera_available = False
 
         # 4. Start streaming audio capturer with selected mic
         mic_idx = self.combo_mic.currentData()
-        if mic_idx is not None:
+        if mic_idx is not None and self.audio_capturer is None:
             self.audio_capturer = AudioCapturer(
-                audio_queue=self.connectee_client.frame_queue,
-                loop=self.connectee_client.loop,
+                connectee_client=self.connectee_client,
                 samplerate=16000,
                 mic_device_index=mic_idx
             )
             self.audio_capturer.start()
             self.connectee_client.audio_capturer = self.audio_capturer
             self.connectee_client.mic_available = self.audio_capturer.is_available
-        else:
+        elif self.audio_capturer is None:
             self.connectee_client.mic_available = False
 
         # 5. Hide main window to system tray
         self.hide()
 
+    def _stop_media_capturers(self):
+        if self.webcam_capturer is not None:
+            try:
+                self.webcam_capturer.stop()
+            except Exception:
+                pass
+            self.webcam_capturer = None
+            self.connectee_client.webcam_capturer = None
+
+        if self.audio_capturer is not None:
+            try:
+                self.audio_capturer.stop()
+            except Exception:
+                pass
+            self.audio_capturer = None
+            self.connectee_client.audio_capturer = None
+
+    def _on_connector_left(self, count: int):
+        self.tray_icon.setToolTip(f"Hotspot (Connected: {count})")
+        if count == 0:
+            self._stop_media_capturers()
+
     def _on_host_code_reset(self, new_code: str):
         self.lbl_my_code.setText(new_code)
         self.config["saved_code"] = new_code
         save_config(self.config)
+        self._stop_media_capturers()
 
     def _on_reset_code_clicked(self):
         self.connectee_client.kick_and_reset()

@@ -41,14 +41,21 @@ class RemoteCanvas(QWidget):
     def _get_render_rect(self):
         if self.current_pixmap.isNull():
             return QRect()
-        scaled = self.current_pixmap.scaled(
-            self.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
-        )
-        x = (self.width() - scaled.width()) // 2
-        y = (self.height() - scaled.height()) // 2
-        return QRect(x, y, scaled.width(), scaled.height())
+        pm_w, pm_h = self.current_pixmap.width(), self.current_pixmap.height()
+        if pm_w <= 0 or pm_h <= 0:
+            return QRect()
+        w, h = self.width(), self.height()
+        if w <= 0 or h <= 0:
+            return QRect()
+        aspect = pm_w / pm_h
+        target_w = w
+        target_h = int(w / aspect)
+        if target_h > h:
+            target_h = h
+            target_w = int(h * aspect)
+        x = (w - target_w) // 2
+        y = (h - target_h) // 2
+        return QRect(x, y, target_w, target_h)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -56,12 +63,7 @@ class RemoteCanvas(QWidget):
 
         if not self.current_pixmap.isNull():
             render_rect = self._get_render_rect()
-            scaled = self.current_pixmap.scaled(
-                render_rect.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation
-            )
-            painter.drawPixmap(render_rect.x(), render_rect.y(), scaled)
+            painter.drawPixmap(render_rect, self.current_pixmap)
 
             # Draw selection rectangle if active in select mode
             if self.is_selecting and self.selection_start and self.selection_current:

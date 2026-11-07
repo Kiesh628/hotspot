@@ -11,6 +11,7 @@ logger = logging.getLogger("HotspotNetwork")
 class ConnecteeSignals(QObject):
     registered = Signal(str, str) # code, nickname
     connector_joined = Signal(int) # count (used to auto-hide UI to tray)
+    connector_left = Signal(int) # count remaining
     code_reset = Signal(str) # new_code
     connection_status = Signal(bool, str) # is_connected, message
     media_control_received = Signal(bool, bool) # camera_enabled, mic_enabled
@@ -44,6 +45,27 @@ class ConnecteeClient:
         self.mic_available = False
         self.webcam_capturer = None
         self.audio_capturer = None
+        self.connector_count = 0
+
+    @property
+    def has_connectors(self) -> bool:
+        return self.connector_count > 0
+
+    def send_packet(self, packet: bytes, max_queue_size: int = 2) -> bool:
+        """
+        Thread-safe method for capturers to push binary packets (screen, webcam, mic)
+        into the asyncio transmission queue without throwing errors when not ready.
+        """
+        if not self.running:
+            return False
+        if self.frame_queue is not None and self.loop is not None and self.loop.is_running():
+            try:
+                if self.frame_queue.qsize() < max_queue_size:
+                    asyncio.run_coroutine_threadsafe(self.frame_queue.put(packet), self.loop)
+                    return True
+            except Exception as e:
+                logger.warning(f"Error queueing packet: {e}")
+        return False
 
     def start(self):
         self.running = True
@@ -116,6 +138,7 @@ class ConnecteeClient:
                     self.signals.registered.emit(self.code, self.nickname)
                 elif msg_type == "connector_joined":
                     cnt = data.get("connector_count", 1)
+                    self.connector_count = cnt
                     self.signals.connector_joined.emit(cnt)
                     # Resend media capabilities to newly joined connector
                     await ws.send(json.dumps({
@@ -124,8 +147,13 @@ class ConnecteeClient:
                         "camera_available": self.camera_available,
                         "mic_available": self.mic_available
                     }))
+                elif msg_type == "connector_left":
+                    cnt = data.get("connector_count", 0)
+                    self.connector_count = cnt
+                    self.signals.connector_left.emit(cnt)
                 elif msg_type == "code_reset":
                     self.code = data.get("code", self.code)
+                    self.connector_count = 0
                     self.signals.code_reset.emit(self.code)
                 elif msg_type == "input":
                     event = data.get("event")
@@ -159,6 +187,14 @@ class ConnecteeClient:
             logger.warning(f"Error handling simulated input: {e}")
 
     async def _frame_sender(self, ws):
+        # Drain any stale frames from prior connection
+        if self.frame_queue:
+            while not self.frame_queue.empty():
+                try:
+                    self.frame_queue.get_nowait()
+                except (asyncio.QueueEmpty, Exception):
+                    break
+
         while self.running:
             packet_bytes = await self.frame_queue.get()
             try:
@@ -180,6 +216,7 @@ class ConnecteeClient:
         return self.is_locally_blocked
 
     def kick_and_reset(self):
+        self.connector_count = 0
         if self.ws and self.loop and self.loop.is_running():
             asyncio.run_coroutine_threadsafe(
                 self.ws.send(json.dumps({"type": "kick_and_reset"})),
