@@ -121,3 +121,35 @@ def create_mode_icon(mode: str = "control", size: int = 24) -> QIcon:
 
     painter.end()
     return QIcon(pixmap)
+
+
+def create_eye_icon(visible: bool = True, size: int = 20) -> QIcon:
+    """
+    Renders a vector eye icon for password show/hide toggle.
+    """
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    color = QColor("#a1a1aa") if visible else QColor("#71717a")
+    pen = QPen(color, 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+
+    # Eye outline (two arcs or oval)
+    eye_rect = QRectF(size * 0.15, size * 0.28, size * 0.7, size * 0.44)
+    painter.drawRoundedRect(eye_rect, size * 0.35, size * 0.22)
+
+    # Pupil
+    painter.setBrush(color)
+    painter.drawEllipse(QPointF(size * 0.5, size * 0.5), size * 0.12, size * 0.12)
+
+    # Slash if hidden
+    if not visible:
+        slash_pen = QPen(QColor("#ef4444"), 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        painter.setPen(slash_pen)
+        painter.drawLine(QPointF(size * 0.18, size * 0.82), QPointF(size * 0.82, size * 0.18))
+
+    painter.end()
+    return QIcon(pixmap)

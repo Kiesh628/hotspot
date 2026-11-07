@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from config import load_config, save_config, generate_random_code, validate_keybind_uniqueness
+from ui.icons import create_eye_icon
 from ui.keybind_widget import MinecraftKeybindButton
 from ui.connector_window import ConnectorWindow
 from ui.device_preview import AudioMonitor, CameraPreviewThread, VolumeMeter, CameraThumbnail, open_camera_capture
@@ -200,13 +201,24 @@ class MainWindow(QMainWindow):
         self.input_api_key.setPlaceholderText("Paste Gemini API Key...")
         gemini_box.addWidget(self.input_api_key)
 
+        self.btn_toggle_key_vis = QPushButton()
+        self.btn_toggle_key_vis.setFixedSize(32, 32)
+        self.btn_toggle_key_vis.setIcon(create_eye_icon(False, size=18))
+        self.btn_toggle_key_vis.setToolTip("Show / Hide API key")
+        self.btn_toggle_key_vis.setProperty("class", "secondary-btn")
+        self.btn_toggle_key_vis.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_toggle_key_vis.clicked.connect(self._toggle_key_visibility)
+        gemini_box.addWidget(self.btn_toggle_key_vis)
+
         self.btn_verify_key = QPushButton("Verify")
         self.btn_verify_key.setProperty("class", "secondary-btn")
+        self.btn_verify_key.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_verify_key.clicked.connect(self._on_verify_key_clicked)
         gemini_box.addWidget(self.btn_verify_key)
         left_layout.addLayout(gemini_box)
 
         self.lbl_key_status = QLabel("")
+        self.lbl_key_status.setWordWrap(True)
         self.lbl_key_status.setStyleSheet("font-size: 11px;")
         if self.config.get("gemini_api_key"):
             self.lbl_key_status.setText("Saved key present (Click Verify to test)")
@@ -466,6 +478,14 @@ class MainWindow(QMainWindow):
         mic_idx = self.combo_mic.currentData()
         if mic_idx is not None:
             self.audio_monitor.start(mic_idx)
+
+    def _toggle_key_visibility(self):
+        if self.input_api_key.echoMode() == QLineEdit.EchoMode.Password:
+            self.input_api_key.setEchoMode(QLineEdit.EchoMode.Normal)
+            self.btn_toggle_key_vis.setIcon(create_eye_icon(True, size=18))
+        else:
+            self.input_api_key.setEchoMode(QLineEdit.EchoMode.Password)
+            self.btn_toggle_key_vis.setIcon(create_eye_icon(False, size=18))
 
     def _on_verify_key_clicked(self):
         raw_key = self.input_api_key.text()
