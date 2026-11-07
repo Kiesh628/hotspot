@@ -5,10 +5,12 @@ import logging
 logger = logging.getLogger("GeminiClient")
 
 PREFERRED_MODELS = [
-    "gemini-2.5-flash",
+    "gemini-3.1-flash-lite",
+    "gemini-3.5-flash-lite",
     "gemini-flash-latest",
-    "gemini-2.0-flash",
-    "gemini-1.5-flash"
+    "gemini-3.8-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.0-flash"
 ]
 
 class GeminiClient:
@@ -25,6 +27,7 @@ class GeminiClient:
         if not key:
             return False, "API key is empty."
 
+        last_err = ""
         for model in PREFERRED_MODELS:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
             try:
@@ -35,7 +38,7 @@ class GeminiClient:
                         "Content-Type": "application/json"
                     },
                     json={"contents": [{"parts": [{"text": "ping"}]}]},
-                    timeout=5
+                    timeout=6
                 )
                 
                 err_msg = ""
@@ -52,25 +55,25 @@ class GeminiClient:
                     return False, f"Invalid key: {err_msg or 'API key not valid'}"
                 elif resp.status_code == 403:
                     return False, f"Permission error: {err_msg or 'Access forbidden or API disabled'}"
-                elif resp.status_code == 429:
-                    return False, "Rate limit reached. Please retry in a moment."
-                elif resp.status_code == 404:
-                    # Model not found on this endpoint version, try next model
+                elif resp.status_code in (404, 503, 429):
+                    # Model not available, temporarily busy (503 high demand), or rate-limited -> fallback to next model!
+                    last_err = err_msg or f"Model {model} returned {resp.status_code}"
                     continue
                 else:
                     return False, f"Google API Error ({resp.status_code}): {err_msg or resp.text[:100]}"
             except requests.exceptions.Timeout:
-                return False, "Connection timed out. Check your internet connection."
+                continue
             except Exception as e:
-                return False, f"Network error: {e}"
+                last_err = str(e)
+                continue
 
-        # If all preferred models returned 404, fallback to checking GET /models
+        # If all individual models were busy, check GET /models as final verification
         try:
             url_fallback = f"https://generativelanguage.googleapis.com/v1beta/models?key={key}"
             resp_fb = requests.get(url_fallback, timeout=5)
             if resp_fb.status_code == 200:
                 return True, "API key verified successfully!"
-            return False, f"Verification failed with status {resp_fb.status_code}"
+            return False, f"Verification failed ({resp_fb.status_code}): {last_err or 'Check API key'}"
         except Exception as e:
             return False, f"Network error: {e}"
 
@@ -135,7 +138,8 @@ class GeminiClient:
                         if item_parts and "text" in item_parts[0]:
                             return item_parts[0]["text"].strip()
                     return "No response text received from Gemini."
-                elif resp.status_code == 404:
+                elif resp.status_code in (404, 503, 429):
+                    logger.warning(f"Model {model} returned {resp.status_code}, attempting fallback model...")
                     continue
                 else:
                     return f"Gemini Error ({resp.status_code}): {resp.text}"
