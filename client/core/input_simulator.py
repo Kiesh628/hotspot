@@ -16,6 +16,17 @@ KEYEVENTF_EXTENDEDKEY = 0x0001
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_UNICODE = 0x0004
 
+BLOCKED_SIMULATOR_VKS = {
+    0x11, 0xA2, 0xA3, # VK_CONTROL, VK_LCONTROL, VK_RCONTROL
+    0x12, 0xA4, 0xA5, # VK_MENU, VK_LMENU, VK_RMENU
+    0x09,             # VK_TAB
+    0x5B, 0x5C        # VK_LWIN, VK_RWIN
+}
+
+BLOCKED_SIMULATOR_NAMES = {
+    "control", "ctrl", "alt", "altgr", "tab", "backtab", "meta", "windows", "win", "super"
+}
+
 VK_MAP = {
     "Return": 0x0D,
     "Enter": 0x0D,
@@ -79,7 +90,30 @@ class InputSimulator:
         # 120 units per scroll step
         ctypes.windll.user32.mouse_event(MOUSEEVENTF_WHEEL, 0, 0, delta_y, 0)
 
+    def _is_blocked(self, key_name: str, vk: int = 0, char: str = "") -> bool:
+        if vk in BLOCKED_SIMULATOR_VKS:
+            return True
+        clean_name = key_name.strip().lower() if key_name else ""
+        if clean_name in BLOCKED_SIMULATOR_NAMES:
+            return True
+        if char == "\t":
+            return True
+        try:
+            from config import load_config
+            cfg = load_config()
+            for k in ("keybind_freeze", "keybind_kick", "keybind_mode"):
+                val = cfg.get(k)
+                if val and str(val).strip().lower() not in ("none", ""):
+                    bind = str(val).strip().lower()
+                    if clean_name == bind or (char and char.strip().lower() == bind):
+                        return True
+        except Exception:
+            pass
+        return False
+
     def key_down(self, key_name: str, vk: int = 0, char: str = ""):
+        if self._is_blocked(key_name, vk, char):
+            return
         if key_name in VK_MAP:
             vk_code = VK_MAP[key_name]
             ctypes.windll.user32.keybd_event(vk_code, 0, 0, 0)
@@ -91,6 +125,8 @@ class InputSimulator:
             ctypes.windll.user32.keybd_event(0, code, KEYEVENTF_UNICODE, 0)
 
     def key_up(self, key_name: str, vk: int = 0, char: str = ""):
+        if self._is_blocked(key_name, vk, char):
+            return
         if key_name in VK_MAP:
             vk_code = VK_MAP[key_name]
             ctypes.windll.user32.keybd_event(vk_code, 0, KEYEVENTF_KEYUP, 0)

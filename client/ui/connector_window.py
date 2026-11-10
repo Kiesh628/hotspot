@@ -73,6 +73,91 @@ def format_markdown(text: str) -> str:
 
     return s
 
+# Keys, virtual keys, and modifiers that must NEVER be transmitted to connectee
+BLOCKED_KEYS = {
+    Qt.Key.Key_Control,
+    Qt.Key.Key_Alt,
+    getattr(Qt.Key, "Key_AltGr", -1),
+    Qt.Key.Key_Tab,
+    Qt.Key.Key_Backtab,
+    Qt.Key.Key_Meta,
+    getattr(Qt.Key, "Key_Super_L", -1),
+    getattr(Qt.Key, "Key_Super_R", -1),
+}
+
+BLOCKED_VKS = {
+    0x11, 0xA2, 0xA3, # VK_CONTROL, VK_LCONTROL, VK_RCONTROL
+    0x12, 0xA4, 0xA5, # VK_MENU, VK_LMENU, VK_RMENU
+    0x09,             # VK_TAB
+    0x5B, 0x5C        # VK_LWIN, VK_RWIN
+}
+
+BLOCKED_MODIFIERS = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier
+
+def qkeyevent_to_key_str(event: QKeyEvent) -> str:
+    key = event.key()
+    parts = []
+    modifiers = event.modifiers()
+    if modifiers & Qt.KeyboardModifier.ControlModifier and key != Qt.Key.Key_Control:
+        parts.append("ctrl")
+    if modifiers & Qt.KeyboardModifier.AltModifier and key not in (Qt.Key.Key_Alt, getattr(Qt.Key, "Key_AltGr", -1)):
+        parts.append("alt")
+    if modifiers & Qt.KeyboardModifier.ShiftModifier and key != Qt.Key.Key_Shift:
+        parts.append("shift")
+
+    key_name = ""
+    if Qt.Key.Key_F1 <= key <= Qt.Key.Key_F24:
+        key_name = f"f{key - Qt.Key.Key_F1 + 1}"
+    elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+        key_name = "enter"
+    elif key == Qt.Key.Key_Space:
+        key_name = "space"
+    elif key in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+        key_name = "tab"
+    elif key == Qt.Key.Key_Backspace:
+        key_name = "backspace"
+    elif key == Qt.Key.Key_Delete:
+        key_name = "delete"
+    elif key == Qt.Key.Key_Insert:
+        key_name = "insert"
+    elif key == Qt.Key.Key_Home:
+        key_name = "home"
+    elif key == Qt.Key.Key_End:
+        key_name = "end"
+    elif key == Qt.Key.Key_PageUp:
+        key_name = "page up"
+    elif key == Qt.Key.Key_PageDown:
+        key_name = "page down"
+    elif key == Qt.Key.Key_Left:
+        key_name = "left"
+    elif key == Qt.Key.Key_Right:
+        key_name = "right"
+    elif key == Qt.Key.Key_Up:
+        key_name = "up"
+    elif key == Qt.Key.Key_Down:
+        key_name = "down"
+    elif key == Qt.Key.Key_Control:
+        key_name = "ctrl"
+    elif key in (Qt.Key.Key_Alt, getattr(Qt.Key, "Key_AltGr", -1)):
+        key_name = "alt"
+    elif key == Qt.Key.Key_Shift:
+        key_name = "shift"
+    elif key in (Qt.Key.Key_Meta, getattr(Qt.Key, "Key_Super_L", -1), getattr(Qt.Key, "Key_Super_R", -1)):
+        key_name = "win"
+    else:
+        text = event.text().strip().lower()
+        if text:
+            key_name = text
+        elif 32 <= key <= 126:
+            key_name = chr(key).lower()
+        else:
+            key_name = f"key_{key}"
+
+    if key_name and key_name not in parts:
+        parts.append(key_name)
+
+    return "+".join(parts)
+
 class RemoteCanvas(QWidget):
     region_selected = Signal(bytes) # Emits cropped JPEG bytes when a region is boxed
 
@@ -224,8 +309,52 @@ class RemoteCanvas(QWidget):
             self.client.send_input({"event": "wheel", "dy": delta})
         super().wheelEvent(event)
 
+    def _is_key_blocked(self, event: QKeyEvent) -> bool:
+        key = event.key()
+        vk = event.nativeVirtualKey()
+
+        # 1. Always block Ctrl, Alt, Tab, Windows keys
+        if key in BLOCKED_KEYS or vk in BLOCKED_VKS:
+            return True
+
+        # 2. Block key events where Ctrl, Alt, or Windows modifiers are held
+        if event.modifiers() & BLOCKED_MODIFIERS:
+            return True
+
+        # 3. Block configured Hotspot system keybinds (Freeze, Kick, Mode Switch)
+        blocked_binds = set()
+        parent_w = self.parent()
+        if parent_w and hasattr(parent_w, "get_blocked_keybinds"):
+            blocked_binds = parent_w.get_blocked_keybinds()
+        else:
+            try:
+                from config import load_config
+                cfg = load_config()
+                for conf_k in ("keybind_freeze", "keybind_kick", "keybind_mode"):
+                    v = cfg.get(conf_k)
+                    if v and str(v).strip().lower() not in ("none", ""):
+                        blocked_binds.add(str(v).strip().lower())
+            except Exception:
+                pass
+
+        if blocked_binds:
+            key_str = qkeyevent_to_key_str(event)
+            if key_str in blocked_binds:
+                return True
+            text = event.text().strip().lower()
+            if text and text in blocked_binds:
+                return True
+            if Qt.Key.Key_F1 <= key <= Qt.Key.Key_F24 and f"f{key - Qt.Key.Key_F1 + 1}" in blocked_binds:
+                return True
+
+        return False
+
     def keyPressEvent(self, event: QKeyEvent):
         if self.get_mode_fn() == "control":
+            if self._is_key_blocked(event):
+                event.accept()
+                return
+
             key = event.key()
             text = event.text()
             key_name = event.text() if event.text() else f"key_{key}"
@@ -233,8 +362,6 @@ class RemoteCanvas(QWidget):
                 key_name = "Enter"
             elif key == Qt.Key.Key_Backspace:
                 key_name = "Backspace"
-            elif key == Qt.Key.Key_Tab:
-                key_name = "Tab"
             elif key == Qt.Key.Key_Space:
                 key_name = "Space"
 
@@ -250,14 +377,16 @@ class RemoteCanvas(QWidget):
 
     def keyReleaseEvent(self, event: QKeyEvent):
         if self.get_mode_fn() == "control":
+            if self._is_key_blocked(event):
+                event.accept()
+                return
+
             key = event.key()
             key_name = event.text() if event.text() else f"key_{key}"
             if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
                 key_name = "Enter"
             elif key == Qt.Key.Key_Backspace:
                 key_name = "Backspace"
-            elif key == Qt.Key.Key_Tab:
-                key_name = "Tab"
             elif key == Qt.Key.Key_Space:
                 key_name = "Space"
 
@@ -293,14 +422,34 @@ class WebcamBox(QLabel):
 class ConnectorWindow(QWidget):
     closed = Signal()
 
-    def __init__(self, connector_client, nickname: str = "", is_blocked: bool = False, gemini_api_key: str = "", mode_key: str = "None", parent=None):
+    def __init__(self, connector_client, nickname: str = "", is_blocked: bool = False,
+                 gemini_api_key: str = "", mode_key: str = "None",
+                 freeze_key: str = "None", kick_key: str = "None", parent=None):
         super().__init__(parent)
         self.client = connector_client
         self.nickname = nickname.strip() if nickname else ""
         self.is_blocked = is_blocked
         self.gemini_api_key = gemini_api_key
         self.mode_key = mode_key if mode_key else "None"
+        self.freeze_key = freeze_key if freeze_key else "None"
+        self.kick_key = kick_key if kick_key else "None"
         self.current_mode = "control"
+
+    def get_blocked_keybinds(self) -> set[str]:
+        keys = set()
+        for k in (self.mode_key, self.freeze_key, self.kick_key):
+            if k and str(k).strip().lower() not in ("none", ""):
+                keys.add(str(k).strip().lower())
+        try:
+            from config import load_config
+            cfg = load_config()
+            for conf_k in ("keybind_freeze", "keybind_kick", "keybind_mode"):
+                v = cfg.get(conf_k)
+                if v and str(v).strip().lower() not in ("none", ""):
+                    keys.add(str(v).strip().lower())
+        except Exception:
+            pass
+        return keys
 
         # Media states
         self.cam_state = "active"

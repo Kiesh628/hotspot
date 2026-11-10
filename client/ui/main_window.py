@@ -620,7 +620,9 @@ class MainWindow(QMainWindow):
             nickname=nickname,
             is_blocked=is_blocked,
             gemini_api_key=self.config.get("gemini_api_key", ""),
-            mode_key=self.config.get("keybind_mode", "None")
+            mode_key=self.config.get("keybind_mode", "None"),
+            freeze_key=self.config.get("keybind_freeze", "None"),
+            kick_key=self.config.get("keybind_kick", "None")
         )
         self.connector_window.closed.connect(self._on_connector_window_closed)
         self.connector_window.show()
