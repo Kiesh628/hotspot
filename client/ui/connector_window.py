@@ -435,22 +435,6 @@ class ConnectorWindow(QWidget):
         self.kick_key = kick_key if kick_key else "None"
         self.current_mode = "control"
 
-    def get_blocked_keybinds(self) -> set[str]:
-        keys = set()
-        for k in (self.mode_key, self.freeze_key, self.kick_key):
-            if k and str(k).strip().lower() not in ("none", ""):
-                keys.add(str(k).strip().lower())
-        try:
-            from config import load_config
-            cfg = load_config()
-            for conf_k in ("keybind_freeze", "keybind_kick", "keybind_mode"):
-                v = cfg.get(conf_k)
-                if v and str(v).strip().lower() not in ("none", ""):
-                    keys.add(str(v).strip().lower())
-        except Exception:
-            pass
-        return keys
-
         # Media states
         self.cam_state = "active"
         self.mic_state = "active"
@@ -474,6 +458,22 @@ class ConnectorWindow(QWidget):
 
         if self.is_blocked:
             self.freeze_banner.show()
+
+    def get_blocked_keybinds(self) -> set[str]:
+        keys = set()
+        for k in (self.mode_key, self.freeze_key, self.kick_key):
+            if k and str(k).strip().lower() not in ("none", ""):
+                keys.add(str(k).strip().lower())
+        try:
+            from config import load_config
+            cfg = load_config()
+            for conf_k in ("keybind_freeze", "keybind_kick", "keybind_mode"):
+                v = cfg.get(conf_k)
+                if v and str(v).strip().lower() not in ("none", ""):
+                    keys.add(str(v).strip().lower())
+        except Exception:
+            pass
+        return keys
 
     def _build_ui(self, app_title: str):
         root_layout = QVBoxLayout(self)
